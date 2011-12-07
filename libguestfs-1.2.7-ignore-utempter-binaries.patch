@@ -1,0 +1,17 @@
+Ignore unreadable 'utempter' binaries.
+
+diff --git a/appliance/make.sh.in b/appliance/make.sh.in
+index 56b882a..3a9f7d2 100755
+--- a/appliance/make.sh.in
++++ b/appliance/make.sh.in
+@@ -94,6 +94,7 @@ if [ "@DIST@" = "REDHAT" ]; then
+     /usr/bin/chfn \
+     /usr/bin/chsh \
+     /usr/libexec/pt_chown \
++    /usr/libexec/utempter/utempter \
+     /usr/sbin/groupdel \
+     /usr/sbin/groupadd \
+     /usr/sbin/useradd \
+-- 
+1.6.6.1
+

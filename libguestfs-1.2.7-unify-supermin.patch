@@ -1,0 +1,2504 @@
+Unify the supermin appliance to use the febootstrap 2.7 method
+of creating the appliance on the fly, instead of the old internal
+libguestfs method.
+
+This allows us to add optional components to the libguestfs
+appliance by installing extra RPMs.
+
+Backport of the following upstream commits:
+8700a55d52f25f60f01ef1b67cff6d5c0071700b
+40d270b0113f1e30319909b2d51adb5a57079cd1
+
+diff -urN libguestfs-1.2.7.orig/appliance/init libguestfs-1.2.7-unify-supermin/appliance/init
+--- libguestfs-1.2.7.orig/appliance/init	2010-04-12 19:12:50.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/appliance/init	2010-05-17 18:22:28.385422886 +0100
+@@ -5,6 +5,8 @@
+ PATH=/sbin:/usr/sbin:/bin:/usr/bin
+ export PATH
+ 
++mkdir -p /sysroot
++
+ mount -t proc /proc /proc
+ mount -t sysfs /sys /sys
+ 
+diff -urN libguestfs-1.2.7.orig/appliance/libguestfs-supermin-helper.c libguestfs-1.2.7-unify-supermin/appliance/libguestfs-supermin-helper.c
+--- libguestfs-1.2.7.orig/appliance/libguestfs-supermin-helper.c	2010-03-16 15:47:28.000000000 +0000
++++ libguestfs-1.2.7-unify-supermin/appliance/libguestfs-supermin-helper.c	1970-01-01 01:00:00.000000000 +0100
+@@ -1,919 +0,0 @@
+-/* libguestfs-supermin-helper reimplementation in C.
+- * Copyright (C) 2009-2010 Red Hat Inc.
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License
+- * along with this program; if not, write to the Free Software
+- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+- */
+-
+-/* This script builds the supermin appliance on the fly each
+- * time the appliance runs.
+- *
+- * *NOTE*: This program is designed to be very short-lived, and so we
+- * don't normally bother to free up any memory that we allocate.
+- * That's not completely true - we free up stuff if it's obvious and
+- * easy to free up, and ignore the rest.
+- */
+-
+-#include <config.h>
+-
+-#include <stdio.h>
+-#include <stdlib.h>
+-#include <stdarg.h>
+-#include <stdint.h>
+-#include <string.h>
+-#include <errno.h>
+-#include <fcntl.h>
+-#include <inttypes.h>
+-#include <unistd.h>
+-#include <getopt.h>
+-#include <limits.h>
+-#include <fnmatch.h>
+-#include <dirent.h>
+-#include <sys/types.h>
+-#include <sys/time.h>
+-#include <sys/stat.h>
+-#include <assert.h>
+-
+-#include "error.h"
+-#include "filevercmp.h"
+-#include "fts_.h"
+-#include "full-write.h"
+-#include "hash.h"
+-#include "hash-pjw.h"
+-#include "xalloc.h"
+-#include "xvasprintf.h"
+-
+-/* Directory containing candidate kernels.  We could make this
+- * configurable at some point.
+- */
+-#define KERNELDIR "/boot"
+-#define MODULESDIR "/lib/modules"
+-
+-/* Buffer size used in copy operations throughout.  Large for
+- * greatest efficiency.
+- */
+-#define BUFFER_SIZE 65536
+-
+-static struct timeval start_t;
+-static int verbose = 0;
+-
+-static void print_timestamped_message (const char *fs, ...);
+-static const char *create_kernel (const char *hostcpu, const char *kernel);
+-static void create_appliance (const char *sourcedir, const char *hostcpu, const char *repo, const char *modpath, const char *initrd);
+-
+-enum { HELP_OPTION = CHAR_MAX + 1 };
+-
+-static const char *options = "vV";
+-static const struct option long_options[] = {
+-  { "help", 0, 0, HELP_OPTION },
+-  { "verbose", 0, 0, 'v' },
+-  { "version", 0, 0, 'V' },
+-  { 0, 0, 0, 0 }
+-};
+-
+-static void
+-usage (const char *progname)
+-{
+-  printf ("%s: build the supermin appliance on the fly\n"
+-          "\n"
+-          "Usage:\n"
+-          "  %s [-options] sourcedir host_cpu repo kernel initrd\n"
+-          "  %s --help\n"
+-          "  %s --version\n"
+-          "\n"
+-          "This script is used by libguestfs to build the supermin appliance\n"
+-          "(kernel and initrd output files).  You should NOT need to run this\n"
+-          "program directly except if you are debugging tricky supermin\n"
+-          "appliance problems.\n"
+-          "\n"
+-          "NB: The kernel and initrd parameters are OUTPUT parameters.  If\n"
+-          "those files exist, they are overwritten by the output.\n"
+-          "\n"
+-          "Options:\n"
+-          "  --help\n"
+-          "       Display this help text and exit.\n"
+-          "  --verbose | -v\n"
+-          "       Enable verbose messages (give multiple times for more verbosity).\n"
+-          "  --version | -V\n"
+-          "       Display version number and exit.\n"
+-          "\n"
+-          "Typical usage when debugging supermin appliance problems:\n"
+-          "  %s -v /usr/lib*/guestfs x86_64 fedora-12 /tmp/kernel /tmp/initrd\n"
+-          "Note: This will OVERWRITE any existing files called /tmp/kernel\n"
+-          "and /tmp/initrd.\n",
+-          progname, progname, progname, progname, progname);
+-}
+-
+-int
+-main (int argc, char *argv[])
+-{
+-  /* First thing: start the clock. */
+-  gettimeofday (&start_t, NULL);
+-
+-  /* Command line arguments. */
+-  for (;;) {
+-    int c = getopt_long (argc, argv, options, long_options, NULL);
+-    if (c == -1) break;
+-
+-    switch (c) {
+-    case HELP_OPTION:
+-      usage (argv[0]);
+-      exit (EXIT_SUCCESS);
+-
+-    case 'v':
+-      verbose++;
+-      break;
+-
+-    case 'V':
+-      printf (PACKAGE_NAME " " PACKAGE_VERSION "\n");
+-      exit (EXIT_SUCCESS);
+-
+-    default:
+-      usage (argv[0]);
+-      exit (EXIT_FAILURE);
+-    }
+-  }
+-
+-  if (argc - optind != 5) {
+-    usage (argv[0]);
+-    exit (EXIT_FAILURE);
+-  }
+-
+-  const char *sourcedir = argv[optind];
+-
+-  /* Host CPU and repo constants passed from the library (see:
+-   * https://bugzilla.redhat.com/show_bug.cgi?id=558593).
+-   */
+-  const char *hostcpu = argv[optind+1];
+-  const char *repo = argv[optind+2];
+-
+-  /* Output files. */
+-  const char *kernel = argv[optind+3];
+-  const char *initrd = argv[optind+4];
+-
+-  if (verbose)
+-    print_timestamped_message ("sourcedir = %s, "
+-                               "host_cpu = %s, "
+-                               "repo = %s, "
+-                               "kernel = %s, "
+-                               "initrd = %s",
+-                               sourcedir, hostcpu, repo, kernel, initrd);
+-
+-  /* Remove the output files if they exist. */
+-  unlink (kernel);
+-  unlink (initrd);
+-
+-  /* Create kernel output file. */
+-  const char *modpath;
+-  modpath = create_kernel (hostcpu, kernel);
+-
+-  if (verbose)
+-    print_timestamped_message ("finished creating kernel");
+-
+-  /* Create the appliance. */
+-  create_appliance (sourcedir, hostcpu, repo, modpath, initrd);
+-
+-  if (verbose)
+-    print_timestamped_message ("finished creating appliance");
+-
+-  exit (EXIT_SUCCESS);
+-}
+-
+-/* Compute Y - X and return the result in milliseconds.
+- * Approximately the same as this code:
+- * http://www.mpp.mpg.de/~huber/util/timevaldiff.c
+- */
+-static int64_t
+-timeval_diff (const struct timeval *x, const struct timeval *y)
+-{
+-  int64_t msec;
+-
+-  msec = (y->tv_sec - x->tv_sec) * 1000;
+-  msec += (y->tv_usec - x->tv_usec) / 1000;
+-  return msec;
+-}
+-
+-static void
+-print_timestamped_message (const char *fs, ...)
+-{
+-  struct timeval tv;
+-  gettimeofday (&tv, NULL);
+-
+-  va_list args;
+-  char *msg;
+-  int err;
+-
+-  va_start (args, fs);
+-  err = vasprintf (&msg, fs, args);
+-  va_end (args);
+-
+-  if (err < 0) return;
+-
+-  fprintf (stderr, "supermin helper [%05" PRIi64 "ms] %s\n",
+-           timeval_diff (&start_t, &tv), msg);
+-
+-  free (msg);
+-}
+-
+-static char **read_dir (const char *dir);
+-static char **filter_fnmatch (char **strings, const char *patt, int flags);
+-static char **filter_notmatching_substring (char **strings, const char *sub);
+-static void sort (char **strings, int (*compare) (const void *, const void *));
+-static int isdir (const char *path);
+-
+-static int
+-reverse_filevercmp (const void *p1, const void *p2)
+-{
+-  const char *s1 = * (char * const *) p1;
+-  const char *s2 = * (char * const *) p2;
+-
+-  /* Note, arguments are reversed to achieve a reverse sort. */
+-  return filevercmp (s2, s1);
+-}
+-
+-/* Create the kernel.  This chooses an appropriate kernel and makes a
+- * symlink to it.
+- *
+- * Look for the most recent kernel named vmlinuz-*.<arch>* which has a
+- * corresponding directory in /lib/modules/. If the architecture is
+- * x86, look for any x86 kernel.
+- *
+- * RHEL 5 didn't append the arch to the kernel name, so look for
+- * kernels without arch second.
+- *
+- * If no suitable kernel can be found, exit with an error.
+- *
+- * This function returns the module path (ie. /lib/modules/<version>).
+- */
+-static const char *
+-create_kernel (const char *hostcpu, const char *kernel)
+-{
+-  char **all_files = read_dir (KERNELDIR);
+-
+-  /* In original: ls -1dvr /boot/vmlinuz-*.$arch* 2>/dev/null | grep -v xen */
+-  const char *patt;
+-  if (hostcpu[0] == 'i' && hostcpu[2] == '8' && hostcpu[3] == '6' &&
+-      hostcpu[4] == '\0')
+-    patt = "vmlinuz-*.i?86*";
+-  else
+-    patt = xasprintf ("vmlinuz-*.%s*", hostcpu);
+-
+-  char **candidates;
+-  candidates = filter_fnmatch (all_files, patt, FNM_NOESCAPE);
+-  candidates = filter_notmatching_substring (candidates, "xen");
+-
+-  if (candidates[0] == NULL) {
+-    /* In original: ls -1dvr /boot/vmlinuz-* 2>/dev/null | grep -v xen */
+-    patt = "vmlinuz-*";
+-    candidates = filter_fnmatch (all_files, patt, FNM_NOESCAPE);
+-    candidates = filter_notmatching_substring (candidates, "xen");
+-
+-    if (candidates[0] == NULL)
+-      goto no_kernels;
+-  }
+-
+-  sort (candidates, reverse_filevercmp);
+-
+-  /* Choose the first candidate which has a corresponding /lib/modules
+-   * directory.
+-   */
+-  int i;
+-  for (i = 0; candidates[i] != NULL; ++i) {
+-    if (verbose >= 2)
+-      fprintf (stderr, "candidate kernel: " KERNELDIR "/%s\n", candidates[i]);
+-
+-    /* Ignore "vmlinuz-" at the beginning of the kernel name. */
+-    const char *version = &candidates[i][8];
+-
+-    /* /lib/modules/<version> */
+-    char *modpath = xasprintf (MODULESDIR "/%s", version);
+-
+-    if (verbose >= 2)
+-      fprintf (stderr, "checking modpath %s is a directory\n", modpath);
+-
+-    if (isdir (modpath)) {
+-      if (verbose >= 2)
+-        fprintf (stderr, "picked %s because modpath %s exists\n",
+-                 candidates[i], modpath);
+-
+-      char *tmp = xasprintf (KERNELDIR "/%s", candidates[i]);
+-
+-      if (verbose >= 2)
+-        fprintf (stderr, "creating symlink %s -> %s\n", kernel, tmp);
+-
+-      if (symlink (tmp, kernel) == -1)
+-        error (EXIT_FAILURE, errno, "symlink kernel");
+-
+-      free (tmp);
+-
+-      return modpath;
+-    }
+-  }
+-
+-  /* Print more diagnostics here than the old script did. */
+- no_kernels:
+-  fprintf (stderr,
+-           "libguestfs-supermin-helper: failed to find a suitable kernel.\n"
+-           "I looked for kernels in " KERNELDIR " and modules in " MODULESDIR
+-           ".\n"
+-           "If this is a Xen guest, and you only have Xen domU kernels\n"
+-           "installed, try installing a fullvirt kernel (only for\n"
+-           "libguestfs use, you shouldn't boot the Xen guest with it).\n");
+-  exit (EXIT_FAILURE);
+-}
+-
+-static void write_kernel_modules (const char *sourcedir, const char *modpath);
+-static void write_hostfiles (const char *sourcedir, const char *hostcpu, const char *repo);
+-static void write_to_fd (const void *buffer, size_t len);
+-static void write_file_to_fd (const char *filename);
+-static void write_file_len_to_fd (const char *filename, size_t len);
+-static void write_padding (size_t len);
+-static char **load_file (const char *filename);
+-static void cpio_append_fts_entry (FTSENT *entry);
+-static void cpio_append_stat (const char *filename, struct stat *);
+-static void cpio_append (const char *filename);
+-static void cpio_append_trailer (void);
+-
+-static int out_fd = -1;
+-static off_t out_offset = 0;
+-
+-/* Create the appliance.
+- *
+- * The initrd consists of these components concatenated together:
+- *
+- * (1) The base skeleton appliance that we constructed at build time.
+- *     name = initramfs.$repo.$host_cpu.supermin.img
+- *     format = plain cpio
+- * (2) The modules from modpath which are on the module whitelist.
+- *     format = plain cpio
+- * (3) The host files which match wildcards in *.supermin.hostfiles.
+- *     format = plain cpio
+- *
+- * The original shell scripted used the external cpio program to
+- * create parts (2) and (3), but we have decided it's going to be
+- * faster if we just write out the data outselves.  The reasons are
+- * that external cpio is slow (particularly when used with SELinux
+- * because it does 512 byte reads), and the format that we're writing
+- * is narrow and well understood, because we only care that the Linux
+- * kernel can read it.
+- */
+-static void
+-create_appliance (const char *sourcedir,
+-                  const char *hostcpu, const char *repo,
+-                  const char *modpath,
+-                  const char *initrd)
+-{
+-  out_fd = open (initrd, O_WRONLY | O_CREAT | O_TRUNC | O_NOCTTY, 0644);
+-  if (out_fd == -1)
+-    error (EXIT_FAILURE, errno, "open: %s", initrd);
+-  out_offset = 0;
+-
+-  /* Copy the base skeleton appliance (1). */
+-  char *tmp = xasprintf ("%s/initramfs.%s.%s.supermin.img",
+-                         sourcedir, repo, hostcpu);
+-  write_file_to_fd (tmp);
+-  free (tmp);
+-
+-  /* Kernel modules (2). */
+-  write_kernel_modules (sourcedir, modpath);
+-
+-  /* Copy hostfiles (3). */
+-  write_hostfiles (sourcedir, hostcpu, repo);
+-
+-  cpio_append_trailer ();
+-
+-  /* Finish off and close output file. */
+-  if (close (out_fd) == -1)
+-    error (EXIT_FAILURE, errno, "close: %s", initrd);
+-}
+-
+-/* Copy kernel modules.
+- *
+- * Find every file under modpath.
+- *
+- * Exclude all *.ko files, *except* ones which match names in
+- * the whitelist (which may contain wildcards).  Include all
+- * other files.
+- *
+- * Add chosen files to the output.
+- */
+-static void
+-write_kernel_modules (const char *sourcedir, const char *modpath)
+-{
+-  char *tmp = xasprintf ("%s/kmod.whitelist", sourcedir);
+-  char **whitelist = load_file (tmp);
+-  free (tmp);
+-
+-  char *paths[2] = { (char *) modpath, NULL };
+-  FTS *fts = fts_open (paths, FTS_COMFOLLOW|FTS_PHYSICAL, NULL);
+-  if (fts == NULL)
+-    error (EXIT_FAILURE, errno, "write_kernel_modules: fts_open: %s", modpath);
+-
+-  for (;;) {
+-    errno = 0;
+-    FTSENT *entry = fts_read (fts);
+-    if (entry == NULL && errno != 0)
+-      error (EXIT_FAILURE, errno, "write_kernel_modules: fts_read: %s", modpath);
+-    if (entry == NULL)
+-      break;
+-
+-    /* Ignore directories being visited in post-order. */
+-    if (entry->fts_info & FTS_DP)
+-      continue;
+-
+-    /* Is it a *.ko file? */
+-    if (entry->fts_namelen >= 3 &&
+-        entry->fts_name[entry->fts_namelen-3] == '.' &&
+-        entry->fts_name[entry->fts_namelen-2] == 'k' &&
+-        entry->fts_name[entry->fts_namelen-1] == 'o') {
+-      /* Is it a *.ko file which is on the whitelist? */
+-      size_t j;
+-      for (j = 0; whitelist[j] != NULL; ++j) {
+-        int r;
+-        r = fnmatch (whitelist[j], entry->fts_name, 0);
+-        if (r == 0) {
+-          /* It's on the whitelist, so include it. */
+-          if (verbose >= 2)
+-            fprintf (stderr, "including kernel module %s (matches whitelist entry %s)\n",
+-                     entry->fts_name, whitelist[j]);
+-          cpio_append_fts_entry (entry);
+-          break;
+-        } else if (r != FNM_NOMATCH)
+-          error (EXIT_FAILURE, 0, "internal error: fnmatch ('%s', '%s', %d) returned unexpected non-zero value %d\n",
+-                 whitelist[j], entry->fts_name, 0, r);
+-      } /* for (j) */
+-    } else
+-      /* It's some other sort of file, or a directory, always include. */
+-      cpio_append_fts_entry (entry);
+-  }
+-
+-  if (fts_close (fts) == -1)
+-    error (EXIT_FAILURE, errno, "write_kernel_modules: fts_close: %s", modpath);
+-}
+-
+-/* Copy the host files.
+- *
+- * Read the list of entries in *.supermin.hostfiles (which may contain
+- * wildcards).  Look them up in the filesystem, and add those files
+- * that exist.  Ignore any files that don't exist or are not readable.
+- */
+-static void
+-write_hostfiles (const char *sourcedir, const char *hostcpu, const char *repo)
+-{
+-  char *tmp = xasprintf ("%s/initramfs.%s.%s.supermin.hostfiles",
+-                         sourcedir, repo, hostcpu);
+-  char **hostfiles = load_file (tmp);
+-  free (tmp);
+-
+-  /* Hostfiles list can contain "." before each path - ignore it.
+-   * It also contains each directory name before we enter it.  But
+-   * we don't read that until we see a wildcard for that directory.
+-   */
+-  size_t i, j;
+-  for (i = 0; hostfiles[i] != NULL; ++i) {
+-    char *hostfile = hostfiles[i];
+-    if (hostfile[0] == '.')
+-      hostfile++;
+-
+-    struct stat statbuf;
+-
+-    /* Is it a wildcard? */
+-    if (strchr (hostfile, '*') || strchr (hostfile, '?')) {
+-      char *dirname = xstrdup (hostfile);
+-      char *patt = strrchr (dirname, '/');
+-      assert (patt);
+-      *patt++ = '\0';
+-
+-      char **files = read_dir (dirname);
+-      files = filter_fnmatch (files, patt, FNM_NOESCAPE);
+-
+-      /* Add matching files. */
+-      for (j = 0; files[j] != NULL; ++j) {
+-        tmp = xasprintf ("%s/%s", dirname, files[j]);
+-
+-        if (verbose >= 2)
+-          fprintf (stderr, "including host file %s (matches %s)\n", tmp, patt);
+-
+-        cpio_append (tmp);
+-
+-        free (tmp);
+-      }
+-    }
+-    /* Else does this file/directory/whatever exist? */
+-    else if (lstat (hostfile, &statbuf) == 0) {
+-      if (verbose >= 2)
+-        fprintf (stderr, "including host file %s (directly referenced)\n",
+-                 hostfile);
+-
+-      cpio_append_stat (hostfile, &statbuf);
+-    } /* Ignore files that don't exist. */
+-  }
+-}
+-
+-/*----------*/
+-/* Helper functions. */
+-
+-static void
+-add_string (char ***argv, size_t *n_used, size_t *n_alloc, const char *str)
+-{
+-  char **new_argv;
+-  char *new_str;
+-
+-  if (*n_used >= *n_alloc)
+-    *argv = x2nrealloc (*argv, n_alloc, sizeof (char *));
+-
+-  if (str)
+-    new_str = xstrdup (str);
+-  else
+-    new_str = NULL;
+-
+-  (*argv)[*n_used] = new_str;
+-
+-  (*n_used)++;
+-}
+-
+-static size_t
+-count_strings (char *const *argv)
+-{
+-  size_t argc;
+-
+-  for (argc = 0; argv[argc] != NULL; ++argc)
+-    ;
+-  return argc;
+-}
+-
+-struct dir_cache {
+-  char *path;
+-  char **files;
+-};
+-
+-static size_t
+-dir_cache_hash (void const *x, size_t table_size)
+-{
+-  struct dir_cache const *p = x;
+-  return hash_pjw (p->path, table_size);
+-}
+-
+-static bool
+-dir_cache_compare (void const *x, void const *y)
+-{
+-  struct dir_cache const *p = x;
+-  struct dir_cache const *q = y;
+-  return strcmp (p->path, q->path) == 0;
+-}
+-
+-/* Read a directory into a list of strings.
+- *
+- * Previously looked up directories are cached and returned quickly,
+- * saving some considerable amount of time compared to reading the
+- * directory over again.  However this means you really must not
+- * alter the array of strings that are returned.
+- *
+- * Returns an empty list if the directory cannot be opened.
+- */
+-static char **
+-read_dir (const char *name)
+-{
+-  static Hash_table *ht = NULL;
+-
+-  if (!ht)
+-    ht = hash_initialize (1024, NULL, dir_cache_hash, dir_cache_compare, NULL);
+-
+-  struct dir_cache key = { .path = (char *) name };
+-  struct dir_cache *p = hash_lookup (ht, &key);
+-  if (p)
+-    return p->files;
+-
+-  char **files = NULL;
+-  size_t n_used = 0, n_alloc = 0;
+-
+-  DIR *dir = opendir (name);
+-  if (!dir) {
+-    /* If it fails to open, that's OK, skip to the end. */
+-    /*perror (name);*/
+-    goto done;
+-  }
+-
+-  for (;;) {
+-    errno = 0;
+-    struct dirent *d = readdir (dir);
+-    if (d == NULL) {
+-      if (errno != 0)
+-        /* But if it fails here, after opening and potentially reading
+-         * part of the directory, that's a proper failure - inform the
+-         * user and exit.
+-         */
+-        error (EXIT_FAILURE, errno, "%s", name);
+-      break;
+-    }
+-
+-    add_string (&files, &n_used, &n_alloc, d->d_name);
+-  }
+-
+-  if (closedir (dir) == -1)
+-    error (EXIT_FAILURE, errno, "closedir: %s", name);
+-
+- done:
+-  /* NULL-terminate the array. */
+-  add_string (&files, &n_used, &n_alloc, NULL);
+-
+-  /* Add it to the hash for next time. */
+-  p = xmalloc (sizeof *p);
+-  p->path = (char *) name;
+-  p->files = files;
+-  p = hash_insert (ht, p);
+-  assert (p != NULL);
+-
+-  return files;
+-}
+-
+-/* Filter a list of strings and return only those matching the wildcard. */
+-static char **
+-filter_fnmatch (char **strings, const char *patt, int flags)
+-{
+-  char **out = NULL;
+-  size_t n_used = 0, n_alloc = 0;
+-
+-  int i, r;
+-  for (i = 0; strings[i] != NULL; ++i) {
+-    r = fnmatch (patt, strings[i], flags);
+-    if (r == 0)
+-      add_string (&out, &n_used, &n_alloc, strings[i]);
+-    else if (r != FNM_NOMATCH)
+-      error (EXIT_FAILURE, 0, "internal error: fnmatch ('%s', '%s', %d) returned unexpected non-zero value %d\n",
+-             patt, strings[i], flags, r);
+-  }
+-
+-  add_string (&out, &n_used, &n_alloc, NULL);
+-  return out;
+-}
+-
+-/* Filter a list of strings and return only those which DON'T contain sub. */
+-static char **
+-filter_notmatching_substring (char **strings, const char *sub)
+-{
+-  char **out = NULL;
+-  size_t n_used = 0, n_alloc = 0;
+-
+-  int i;
+-  for (i = 0; strings[i] != NULL; ++i) {
+-    if (strstr (strings[i], sub) == NULL)
+-      add_string (&out, &n_used, &n_alloc, strings[i]);
+-  }
+-
+-  add_string (&out, &n_used, &n_alloc, NULL);
+-  return out;
+-}
+-
+-/* Sort a list of strings, in place, with the comparison function supplied. */
+-static void
+-sort (char **strings, int (*compare) (const void *, const void *))
+-{
+-  qsort (strings, count_strings (strings), sizeof (char *), compare);
+-}
+-
+-/* Return true iff path exists and is a directory.  This version
+- * follows symlinks.
+- */
+-static int
+-isdir (const char *path)
+-{
+-  struct stat statbuf;
+-
+-  if (stat (path, &statbuf) == -1)
+-    return 0;
+-
+-  return S_ISDIR (statbuf.st_mode);
+-}
+-
+-/* Copy contents of buffer to out_fd and keep out_offset correct. */
+-static void
+-write_to_fd (const void *buffer, size_t len)
+-{
+-  if (full_write (out_fd, buffer, len) != len)
+-    error (EXIT_FAILURE, errno, "write");
+-  out_offset += len;
+-}
+-
+-/* Copy contents of file to out_fd. */
+-static void
+-write_file_to_fd (const char *filename)
+-{
+-  char buffer[BUFFER_SIZE];
+-  int fd2;
+-  ssize_t r;
+-
+-  if (verbose >= 2)
+-    fprintf (stderr, "write_file_to_fd %s -> %d\n", filename, out_fd);
+-
+-  fd2 = open (filename, O_RDONLY);
+-  if (fd2 == -1)
+-    error (EXIT_FAILURE, errno, "open: %s", filename);
+-  for (;;) {
+-    r = read (fd2, buffer, sizeof buffer);
+-    if (r == 0)
+-      break;
+-    if (r == -1) {
+-      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+-        continue;
+-      error (EXIT_FAILURE, errno, "read: %s", filename);
+-    }
+-    write_to_fd (buffer, r);
+-  }
+-
+-  if (close (fd2) == -1)
+-    error (EXIT_FAILURE, errno, "close: %s", filename);
+-}
+-
+-/* Copy file of given length to output, and fail if the file has
+- * changed size.
+- */
+-static void
+-write_file_len_to_fd (const char *filename, size_t len)
+-{
+-  char buffer[BUFFER_SIZE];
+-  size_t count = 0;
+-
+-  if (verbose >= 2)
+-    fprintf (stderr, "write_file_to_fd %s -> %d\n", filename, out_fd);
+-
+-  int fd2 = open (filename, O_RDONLY);
+-  if (fd2 == -1)
+-    error (EXIT_FAILURE, errno, "open: %s", filename);
+-  for (;;) {
+-    ssize_t r = read (fd2, buffer, sizeof buffer);
+-    if (r == 0)
+-      break;
+-    if (r == -1) {
+-      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+-        continue;
+-      error (EXIT_FAILURE, errno, "read: %s", filename);
+-    }
+-    write_to_fd (buffer, r);
+-    count += r;
+-    if (count > len)
+-      error (EXIT_FAILURE, 0, "write_file_len_to_fd: %s: file has increased in size\n", filename);
+-  }
+-
+-  if (close (fd2) == -1)
+-    error (EXIT_FAILURE, errno, "close: %s", filename);
+-
+-  if (count != len)
+-    error (EXIT_FAILURE, 0, "libguestfs-supermin-helper: write_file_len_to_fd: %s: file has changed size\n", filename);
+-}
+-
+-/* Load in a file, returning a list of lines. */
+-static char **
+-load_file (const char *filename)
+-{
+-  char **lines = 0;
+-  size_t n_used = 0, n_alloc = 0;
+-
+-  FILE *fp;
+-  fp = fopen (filename, "r");
+-  if (fp == NULL)
+-    error (EXIT_FAILURE, errno, "fopen: %s", filename);
+-
+-  char line[4096];
+-  while (fgets (line, sizeof line, fp)) {
+-    size_t len = strlen (line);
+-    if (len > 0 && line[len-1] == '\n')
+-      line[len-1] = '\0';
+-    add_string (&lines, &n_used, &n_alloc, line);
+-  }
+-
+-  add_string (&lines, &n_used, &n_alloc, NULL);
+-  return lines;
+-}
+-
+-/* Append the file pointed to by FTSENT to the cpio output. */
+-static void
+-cpio_append_fts_entry (FTSENT *entry)
+-{
+-  if (entry->fts_info & FTS_NS || entry->fts_info & FTS_NSOK)
+-    cpio_append (entry->fts_path);
+-  else
+-    cpio_append_stat (entry->fts_path, entry->fts_statp);
+-}
+-
+-/* Append the file named 'filename' to the cpio output. */
+-static void
+-cpio_append (const char *filename)
+-{
+-  struct stat statbuf;
+-
+-  if (lstat (filename, &statbuf) == -1)
+-    error (EXIT_FAILURE, errno, "lstat: %s", filename);
+-  cpio_append_stat (filename, &statbuf);
+-}
+-
+-/* Append the file to the cpio output. */
+-#define PADDING(len) ((((len) + 3) & ~3) - (len))
+-
+-#define CPIO_HEADER_LEN (6 + 13*8)
+-
+-static void
+-cpio_append_stat (const char *filename, struct stat *statbuf)
+-{
+-  const char *orig_filename = filename;
+-
+-  if (*filename == '/')
+-    filename++;
+-  if (*filename == '\0')
+-    filename = ".";
+-
+-  if (verbose >= 2)
+-    fprintf (stderr, "cpio_append_stat %s 0%o -> %d\n",
+-             orig_filename, statbuf->st_mode, out_fd);
+-
+-  /* Regular files and symlinks are the only ones that have a "body"
+-   * in this cpio entry.
+-   */
+-  int has_body = S_ISREG (statbuf->st_mode) || S_ISLNK (statbuf->st_mode);
+-
+-  size_t len = strlen (filename) + 1;
+-
+-  char header[CPIO_HEADER_LEN + 1];
+-  snprintf (header, sizeof header,
+-            "070701"            /* magic */
+-            "%08X"              /* inode */
+-            "%08X"              /* mode */
+-            "%08X" "%08X"       /* uid, gid */
+-            "%08X"              /* nlink */
+-            "%08X"              /* mtime */
+-            "%08X"              /* file length */
+-            "%08X" "%08X"       /* device holding file major, minor */
+-            "%08X" "%08X"       /* for specials, device major, minor */
+-            "%08X"              /* name length (including \0 byte) */
+-            "%08X",             /* checksum (not used by the kernel) */
+-            (unsigned) statbuf->st_ino, statbuf->st_mode,
+-            statbuf->st_uid, statbuf->st_gid,
+-            (unsigned) statbuf->st_nlink, (unsigned) statbuf->st_mtime,
+-            has_body ? (unsigned) statbuf->st_size : 0,
+-            major (statbuf->st_dev), minor (statbuf->st_dev),
+-            major (statbuf->st_rdev), minor (statbuf->st_rdev),
+-            (unsigned) len, 0);
+-
+-  /* Write the header. */
+-  write_to_fd (header, CPIO_HEADER_LEN);
+-
+-  /* Follow with the filename, and pad it. */
+-  write_to_fd (filename, len);
+-  size_t padding_len = PADDING (CPIO_HEADER_LEN + len);
+-  write_padding (padding_len);
+-
+-  /* Follow with the file or symlink content, and pad it. */
+-  if (has_body) {
+-    if (S_ISREG (statbuf->st_mode))
+-      write_file_len_to_fd (orig_filename, statbuf->st_size);
+-    else if (S_ISLNK (statbuf->st_mode)) {
+-      char tmp[PATH_MAX];
+-      if (readlink (orig_filename, tmp, sizeof tmp) == -1)
+-        error (EXIT_FAILURE, errno, "readlink: %s", orig_filename);
+-      write_to_fd (tmp, statbuf->st_size);
+-    }
+-
+-    padding_len = PADDING (statbuf->st_size);
+-    write_padding (padding_len);
+-  }
+-}
+-
+-/* CPIO voodoo. */
+-static void
+-cpio_append_trailer (void)
+-{
+-  struct stat statbuf;
+-  memset (&statbuf, 0, sizeof statbuf);
+-  statbuf.st_nlink = 1;
+-  cpio_append_stat ("TRAILER!!!", &statbuf);
+-
+-  /* CPIO seems to pad up to the next block boundary, ie. up to
+-   * the next 512 bytes.
+-   */
+-  write_padding (((out_offset + 511) & ~511) - out_offset);
+-  assert ((out_offset & 511) == 0);
+-}
+-
+-/* Write 'len' bytes of zeroes out. */
+-static void
+-write_padding (size_t len)
+-{
+-  static const char buffer[512] = { 0 };
+-
+-  while (len > 0) {
+-    size_t n = len < sizeof buffer ? len : sizeof buffer;
+-    write_to_fd (buffer, n);
+-    len -= n;
+-  }
+-}
+diff -urN libguestfs-1.2.7.orig/appliance/Makefile.am libguestfs-1.2.7-unify-supermin/appliance/Makefile.am
+--- libguestfs-1.2.7.orig/appliance/Makefile.am	2010-03-16 15:47:28.000000000 +0000
++++ libguestfs-1.2.7-unify-supermin/appliance/Makefile.am	2010-05-17 18:22:33.391547553 +0100
+@@ -32,35 +32,24 @@
+ # $(libdir) is best.  When we build cross-architecture filesystems we
+ # should probably move them to $(datadir).
+ fsdir = $(libdir)/guestfs
+-fs_DATA = $(APPLIANCE_FILES)
++superminfsdir = $(libdir)/guestfs/supermin.d
+ 
+ # These are the resulting output files from the whole process:
+ #   VMLINUZ        kernel for the full appliance
+ #   INITRAMFSIMG   initramfs (ie. root fs) for the full appliance
+-# For details of the supermin appliance, read the README file:
+-#   SUPERMINIMG    initramfs (ie. partial root fs) for the supermin appliance
+-#   SUPERMINFILES  list of missing files (the ones we will pull out of the
+-#                    host filesystem at runtime) in the supermin appliance
+-APPLIANCE_FILES = $(INITRAMFSIMG) $(VMLINUZ)
++# For details of the supermin appliance, read the README file.
++fs_DATA = $(INITRAMFSIMG) $(VMLINUZ)
+ if SUPERMIN
+-APPLIANCE_FILES += $(SUPERMINIMG) $(SUPERMINFILES) kmod.whitelist
+-bin_PROGRAMS = libguestfs-supermin-helper
+-libguestfs_supermin_helper_SOURCES = \
+-	libguestfs-supermin-helper.c ../gnulib/lib/xalloc-die.c
+-libguestfs_supermin_helper_CFLAGS = \
+-	-I$(srcdir)/../gnulib/lib -I../gnulib/lib \
+-	$(WARN_CFLAGS) $(WERROR_CFLAGS)
+-libguestfs_supermin_helper_LDADD = \
+-	../gnulib/lib/libgnu.la
++fs_DATA += kmod.whitelist
++superminfs_DATA = \
++	supermin.d/base.img \
++	supermin.d/daemon.img \
++	supermin.d/hostfiles
+ endif
+ 
+ # Don't change these names - they must be the same as in '*.sh' scripts.
+ INITRAMFSIMG = initramfs.$(REPO).$(host_cpu).img
+ VMLINUZ = vmlinuz.$(REPO).$(host_cpu)
+-if SUPERMIN
+-SUPERMINIMG = initramfs.$(REPO).$(host_cpu).supermin.img
+-SUPERMINFILES = initramfs.$(REPO).$(host_cpu).supermin.hostfiles
+-endif
+ 
+ # This is for building the normal appliance:
+ $(INITRAMFSIMG) $(VMLINUZ): $(top_builddir)/initramfs/fakeroot.log
+@@ -97,19 +86,19 @@
+ 
+ if SUPERMIN
+ 
+-# First we need to decide which files go in and out of the supermin
+-# appliance.  This decision is made by 'supermin-split.sh'.
+-$(SUPERMINFILES): supermin.incfiles
+-supermin.incfiles: $(top_builddir)/initramfs/fakeroot.log $(top_builddir)/daemon/guestfsd supermin-split.sh
+-	rm -f supermin.incfiles $(SUPERMINFILES)
+-	bash supermin-split.sh
+-
+-# Second we need to create a supermin appliance with just the included
+-# files (leaving out the host files, which we'll add back at runtime).
+-$(SUPERMINIMG): supermin.incfiles supermin-make.sh
+-	rm -f $@
+-	bash supermin-make.sh
++supermin.d/base.img supermin.d/hostfiles: stamp-supermin
++stamp-supermin: $(INITRAMFSIMG)
++	mkdir -p supermin.d
++	rm -f $@ supermin.d/base.img supermin.d/hostfiles
++	febootstrap-to-supermin $(top_builddir)/initramfs supermin.d/base.img supermin.d/hostfiles
++	touch $@
+ 
++supermin.d/daemon.img: $(INITRAMFSIMG)
++	mkdir -p supermin.d
++	rm -f $@ $@-t
++	(cd $(top_builddir)/initramfs && \
++	  echo -e "sbin\nsbin/guestfsd" | cpio --quiet -o -H newc ) > $@-t
++	mv $@-t $@
+ endif
+ 
+ # Extra symlinks needed by the Debian appliance.
+@@ -160,7 +149,8 @@
+ 
+ # Make clean.
+ 
+-CLEANFILES = $(APPLIANCE_FILES) packagelist kmod.whitelist supermin.incfiles
++CLEANFILES = packagelist kmod.whitelist
+ 
+ clean-local:
++	rm -f supermin.d/*
+ 	rm -rf $(top_builddir)/initramfs
+diff -urN libguestfs-1.2.7.orig/appliance/Makefile.in libguestfs-1.2.7-unify-supermin/appliance/Makefile.in
+--- libguestfs-1.2.7.orig/appliance/Makefile.in	2010-05-17 11:18:07.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/appliance/Makefile.in	2010-05-17 18:26:52.700172663 +0100
+@@ -49,7 +49,6 @@
+ # along with this program; if not, write to the Free Software
+ # Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ 
+-
+ VPATH = @srcdir@
+ pkgdatadir = $(datadir)/@PACKAGE@
+ pkgincludedir = $(includedir)/@PACKAGE@
+@@ -70,10 +69,8 @@
+ build_triplet = @build@
+ host_triplet = @host@
+ DIST_COMMON = $(srcdir)/Makefile.am $(srcdir)/Makefile.in \
+-	$(srcdir)/supermin-make.sh.in $(srcdir)/supermin-split.sh.in \
+ 	$(srcdir)/update.sh.in $(top_srcdir)/subdir-rules.mk
+-@SUPERMIN_TRUE@am__append_1 = $(SUPERMINIMG) $(SUPERMINFILES) kmod.whitelist
+-@SUPERMIN_TRUE@bin_PROGRAMS = libguestfs-supermin-helper$(EXEEXT)
++@SUPERMIN_TRUE@am__append_1 = kmod.whitelist
+ subdir = appliance
+ ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
+ am__aclocal_m4_deps = $(top_srcdir)/m4/00gnulib.m4 \
+@@ -161,53 +158,16 @@
+ 	$(ACLOCAL_M4)
+ mkinstalldirs = $(install_sh) -d
+ CONFIG_HEADER = $(top_builddir)/config.h
+-CONFIG_CLEAN_FILES = update.sh supermin-split.sh supermin-make.sh
++CONFIG_CLEAN_FILES = update.sh
+ CONFIG_CLEAN_VPATH_FILES =
+-am__installdirs = "$(DESTDIR)$(bindir)" "$(DESTDIR)$(fsdir)"
+-PROGRAMS = $(bin_PROGRAMS)
+-am__libguestfs_supermin_helper_SOURCES_DIST =  \
+-	libguestfs-supermin-helper.c ../gnulib/lib/xalloc-die.c
+-@SUPERMIN_TRUE@am_libguestfs_supermin_helper_OBJECTS = libguestfs_supermin_helper-libguestfs-supermin-helper.$(OBJEXT) \
+-@SUPERMIN_TRUE@	libguestfs_supermin_helper-xalloc-die.$(OBJEXT)
+-libguestfs_supermin_helper_OBJECTS =  \
+-	$(am_libguestfs_supermin_helper_OBJECTS)
+-@SUPERMIN_TRUE@libguestfs_supermin_helper_DEPENDENCIES =  \
+-@SUPERMIN_TRUE@	../gnulib/lib/libgnu.la
+-AM_V_lt = $(am__v_lt_$(V))
+-am__v_lt_ = $(am__v_lt_$(AM_DEFAULT_VERBOSITY))
+-am__v_lt_0 = --silent
+-libguestfs_supermin_helper_LINK = $(LIBTOOL) $(AM_V_lt) --tag=CC \
+-	$(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=link $(CCLD) \
+-	$(libguestfs_supermin_helper_CFLAGS) $(CFLAGS) $(AM_LDFLAGS) \
+-	$(LDFLAGS) -o $@
+-DEFAULT_INCLUDES = -I.@am__isrc@ -I$(top_builddir)
+-depcomp = $(SHELL) $(top_srcdir)/build-aux/depcomp
+-am__depfiles_maybe = depfiles
+-am__mv = mv -f
+-COMPILE = $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) \
+-	$(CPPFLAGS) $(AM_CFLAGS) $(CFLAGS)
+-LTCOMPILE = $(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) \
+-	$(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) \
+-	$(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) \
+-	$(AM_CFLAGS) $(CFLAGS)
+-AM_V_CC = $(am__v_CC_$(V))
+-am__v_CC_ = $(am__v_CC_$(AM_DEFAULT_VERBOSITY))
+-am__v_CC_0 = @echo "  CC    " $@;
+-AM_V_at = $(am__v_at_$(V))
+-am__v_at_ = $(am__v_at_$(AM_DEFAULT_VERBOSITY))
+-am__v_at_0 = @
+-CCLD = $(CC)
+-LINK = $(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) \
+-	$(LIBTOOLFLAGS) --mode=link $(CCLD) $(AM_CFLAGS) $(CFLAGS) \
+-	$(AM_LDFLAGS) $(LDFLAGS) -o $@
+-AM_V_CCLD = $(am__v_CCLD_$(V))
+-am__v_CCLD_ = $(am__v_CCLD_$(AM_DEFAULT_VERBOSITY))
+-am__v_CCLD_0 = @echo "  CCLD  " $@;
+ AM_V_GEN = $(am__v_GEN_$(V))
+ am__v_GEN_ = $(am__v_GEN_$(AM_DEFAULT_VERBOSITY))
+ am__v_GEN_0 = @echo "  GEN   " $@;
+-SOURCES = $(libguestfs_supermin_helper_SOURCES)
+-DIST_SOURCES = $(am__libguestfs_supermin_helper_SOURCES_DIST)
++AM_V_at = $(am__v_at_$(V))
++am__v_at_ = $(am__v_at_$(AM_DEFAULT_VERBOSITY))
++am__v_at_0 = @
++SOURCES =
++DIST_SOURCES =
+ am__vpath_adj_setup = srcdirstrip=`echo "$(srcdir)" | sed 's|.|.|g'`;
+ am__vpath_adj = case $$p in \
+     $(srcdir)/*) f=`echo "$$p" | sed "s|^$$srcdirstrip/||"`;; \
+@@ -229,9 +189,8 @@
+ am__base_list = \
+   sed '$$!N;$$!N;$$!N;$$!N;$$!N;$$!N;$$!N;s/\n/ /g' | \
+   sed '$$!N;$$!N;$$!N;$$!N;s/\n/ /g'
+-DATA = $(fs_DATA) $(noinst_DATA)
+-ETAGS = etags
+-CTAGS = ctags
++am__installdirs = "$(DESTDIR)$(fsdir)" "$(DESTDIR)$(superminfsdir)"
++DATA = $(fs_DATA) $(noinst_DATA) $(superminfs_DATA)
+ DISTFILES = $(DIST_COMMON) $(DIST_SOURCES) $(TEXINFOS) $(EXTRA_DIST)
+ ACLOCAL = @ACLOCAL@
+ ALLOCA = @ALLOCA@
+@@ -281,6 +240,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+@@ -968,32 +928,22 @@
+ # $(libdir) is best.  When we build cross-architecture filesystems we
+ # should probably move them to $(datadir).
+ fsdir = $(libdir)/guestfs
+-fs_DATA = $(APPLIANCE_FILES)
++superminfsdir = $(libdir)/guestfs/supermin.d
+ 
+ # These are the resulting output files from the whole process:
+ #   VMLINUZ        kernel for the full appliance
+ #   INITRAMFSIMG   initramfs (ie. root fs) for the full appliance
+-# For details of the supermin appliance, read the README file:
+-#   SUPERMINIMG    initramfs (ie. partial root fs) for the supermin appliance
+-#   SUPERMINFILES  list of missing files (the ones we will pull out of the
+-#                    host filesystem at runtime) in the supermin appliance
+-APPLIANCE_FILES = $(INITRAMFSIMG) $(VMLINUZ) $(am__append_1)
+-@SUPERMIN_TRUE@libguestfs_supermin_helper_SOURCES = \
+-@SUPERMIN_TRUE@	libguestfs-supermin-helper.c ../gnulib/lib/xalloc-die.c
+-
+-@SUPERMIN_TRUE@libguestfs_supermin_helper_CFLAGS = \
+-@SUPERMIN_TRUE@	-I$(srcdir)/../gnulib/lib -I../gnulib/lib \
+-@SUPERMIN_TRUE@	$(WARN_CFLAGS) $(WERROR_CFLAGS)
+-
+-@SUPERMIN_TRUE@libguestfs_supermin_helper_LDADD = \
+-@SUPERMIN_TRUE@	../gnulib/lib/libgnu.la
++# For details of the supermin appliance, read the README file.
++fs_DATA = $(INITRAMFSIMG) $(VMLINUZ) $(am__append_1)
++@SUPERMIN_TRUE@superminfs_DATA = \
++@SUPERMIN_TRUE@	supermin.d/base.img \
++@SUPERMIN_TRUE@	supermin.d/daemon.img \
++@SUPERMIN_TRUE@	supermin.d/hostfiles
+ 
+ 
+ # Don't change these names - they must be the same as in '*.sh' scripts.
+ INITRAMFSIMG = initramfs.$(REPO).$(host_cpu).img
+ VMLINUZ = vmlinuz.$(REPO).$(host_cpu)
+-@SUPERMIN_TRUE@SUPERMINIMG = initramfs.$(REPO).$(host_cpu).supermin.img
+-@SUPERMIN_TRUE@SUPERMINFILES = initramfs.$(REPO).$(host_cpu).supermin.hostfiles
+ 
+ # Extra symlinks needed by the Debian appliance.
+ debirf_symlinks = \
+@@ -1005,11 +955,10 @@
+ noinst_DATA = $(debirf_symlinks:%=debian/modules/%)
+ 
+ # Make clean.
+-CLEANFILES = $(APPLIANCE_FILES) packagelist kmod.whitelist supermin.incfiles
++CLEANFILES = packagelist kmod.whitelist
+ all: all-am
+ 
+ .SUFFIXES:
+-.SUFFIXES: .c .lo .o .obj
+ $(srcdir)/Makefile.in:  $(srcdir)/Makefile.am $(top_srcdir)/subdir-rules.mk $(am__configure_deps)
+ 	@for dep in $?; do \
+ 	  case '$(am__configure_deps)' in \
+@@ -1042,121 +991,6 @@
+ $(am__aclocal_m4_deps):
+ update.sh: $(top_builddir)/config.status $(srcdir)/update.sh.in
+ 	cd $(top_builddir) && $(SHELL) ./config.status $(subdir)/$@
+-supermin-split.sh: $(top_builddir)/config.status $(srcdir)/supermin-split.sh.in
+-	cd $(top_builddir) && $(SHELL) ./config.status $(subdir)/$@
+-supermin-make.sh: $(top_builddir)/config.status $(srcdir)/supermin-make.sh.in
+-	cd $(top_builddir) && $(SHELL) ./config.status $(subdir)/$@
+-install-binPROGRAMS: $(bin_PROGRAMS)
+-	@$(NORMAL_INSTALL)
+-	test -z "$(bindir)" || $(MKDIR_P) "$(DESTDIR)$(bindir)"
+-	@list='$(bin_PROGRAMS)'; test -n "$(bindir)" || list=; \
+-	for p in $$list; do echo "$$p $$p"; done | \
+-	sed 's/$(EXEEXT)$$//' | \
+-	while read p p1; do if test -f $$p || test -f $$p1; \
+-	  then echo "$$p"; echo "$$p"; else :; fi; \
+-	done | \
+-	sed -e 'p;s,.*/,,;n;h' -e 's|.*|.|' \
+-	    -e 'p;x;s,.*/,,;s/$(EXEEXT)$$//;$(transform);s/$$/$(EXEEXT)/' | \
+-	sed 'N;N;N;s,\n, ,g' | \
+-	$(AWK) 'BEGIN { files["."] = ""; dirs["."] = 1 } \
+-	  { d=$$3; if (dirs[d] != 1) { print "d", d; dirs[d] = 1 } \
+-	    if ($$2 == $$4) files[d] = files[d] " " $$1; \
+-	    else { print "f", $$3 "/" $$4, $$1; } } \
+-	  END { for (d in files) print "f", d, files[d] }' | \
+-	while read type dir files; do \
+-	    if test "$$dir" = .; then dir=; else dir=/$$dir; fi; \
+-	    test -z "$$files" || { \
+-	    echo " $(INSTALL_PROGRAM_ENV) $(LIBTOOL) $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=install $(INSTALL_PROGRAM) $$files '$(DESTDIR)$(bindir)$$dir'"; \
+-	    $(INSTALL_PROGRAM_ENV) $(LIBTOOL) $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=install $(INSTALL_PROGRAM) $$files "$(DESTDIR)$(bindir)$$dir" || exit $$?; \
+-	    } \
+-	; done
+-
+-uninstall-binPROGRAMS:
+-	@$(NORMAL_UNINSTALL)
+-	@list='$(bin_PROGRAMS)'; test -n "$(bindir)" || list=; \
+-	files=`for p in $$list; do echo "$$p"; done | \
+-	  sed -e 'h;s,^.*/,,;s/$(EXEEXT)$$//;$(transform)' \
+-	      -e 's/$$/$(EXEEXT)/' `; \
+-	test -n "$$list" || exit 0; \
+-	echo " ( cd '$(DESTDIR)$(bindir)' && rm -f" $$files ")"; \
+-	cd "$(DESTDIR)$(bindir)" && rm -f $$files
+-
+-clean-binPROGRAMS:
+-	@list='$(bin_PROGRAMS)'; test -n "$$list" || exit 0; \
+-	echo " rm -f" $$list; \
+-	rm -f $$list || exit $$?; \
+-	test -n "$(EXEEXT)" || exit 0; \
+-	list=`for p in $$list; do echo "$$p"; done | sed 's/$(EXEEXT)$$//'`; \
+-	echo " rm -f" $$list; \
+-	rm -f $$list
+-libguestfs-supermin-helper$(EXEEXT): $(libguestfs_supermin_helper_OBJECTS) $(libguestfs_supermin_helper_DEPENDENCIES) 
+-	@rm -f libguestfs-supermin-helper$(EXEEXT)
+-	$(AM_V_CCLD)$(libguestfs_supermin_helper_LINK) $(libguestfs_supermin_helper_OBJECTS) $(libguestfs_supermin_helper_LDADD) $(LIBS)
+-
+-mostlyclean-compile:
+-	-rm -f *.$(OBJEXT)
+-
+-distclean-compile:
+-	-rm -f *.tab.c
+-
+-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libguestfs_supermin_helper-libguestfs-supermin-helper.Po@am__quote@
+-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libguestfs_supermin_helper-xalloc-die.Po@am__quote@
+-
+-.c.o:
+-@am__fastdepCC_TRUE@	$(AM_V_CC)$(COMPILE) -MT $@ -MD -MP -MF $(DEPDIR)/$*.Tpo -c -o $@ $<
+-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/$*.Tpo $(DEPDIR)/$*.Po
+-@am__fastdepCC_FALSE@	$(AM_V_CC) @AM_BACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='$<' object='$@' libtool=no @AMDEPBACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+-@am__fastdepCC_FALSE@	$(COMPILE) -c $<
+-
+-.c.obj:
+-@am__fastdepCC_TRUE@	$(AM_V_CC)$(COMPILE) -MT $@ -MD -MP -MF $(DEPDIR)/$*.Tpo -c -o $@ `$(CYGPATH_W) '$<'`
+-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/$*.Tpo $(DEPDIR)/$*.Po
+-@am__fastdepCC_FALSE@	$(AM_V_CC) @AM_BACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='$<' object='$@' libtool=no @AMDEPBACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+-@am__fastdepCC_FALSE@	$(COMPILE) -c `$(CYGPATH_W) '$<'`
+-
+-.c.lo:
+-@am__fastdepCC_TRUE@	$(AM_V_CC)$(LTCOMPILE) -MT $@ -MD -MP -MF $(DEPDIR)/$*.Tpo -c -o $@ $<
+-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/$*.Tpo $(DEPDIR)/$*.Plo
+-@am__fastdepCC_FALSE@	$(AM_V_CC) @AM_BACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='$<' object='$@' libtool=yes @AMDEPBACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+-@am__fastdepCC_FALSE@	$(LTCOMPILE) -c -o $@ $<
+-
+-libguestfs_supermin_helper-libguestfs-supermin-helper.o: libguestfs-supermin-helper.c
+-@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libguestfs_supermin_helper_CFLAGS) $(CFLAGS) -MT libguestfs_supermin_helper-libguestfs-supermin-helper.o -MD -MP -MF $(DEPDIR)/libguestfs_supermin_helper-libguestfs-supermin-helper.Tpo -c -o libguestfs_supermin_helper-libguestfs-supermin-helper.o `test -f 'libguestfs-supermin-helper.c' || echo '$(srcdir)/'`libguestfs-supermin-helper.c
+-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/libguestfs_supermin_helper-libguestfs-supermin-helper.Tpo $(DEPDIR)/libguestfs_supermin_helper-libguestfs-supermin-helper.Po
+-@am__fastdepCC_FALSE@	$(AM_V_CC) @AM_BACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='libguestfs-supermin-helper.c' object='libguestfs_supermin_helper-libguestfs-supermin-helper.o' libtool=no @AMDEPBACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+-@am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libguestfs_supermin_helper_CFLAGS) $(CFLAGS) -c -o libguestfs_supermin_helper-libguestfs-supermin-helper.o `test -f 'libguestfs-supermin-helper.c' || echo '$(srcdir)/'`libguestfs-supermin-helper.c
+-
+-libguestfs_supermin_helper-libguestfs-supermin-helper.obj: libguestfs-supermin-helper.c
+-@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libguestfs_supermin_helper_CFLAGS) $(CFLAGS) -MT libguestfs_supermin_helper-libguestfs-supermin-helper.obj -MD -MP -MF $(DEPDIR)/libguestfs_supermin_helper-libguestfs-supermin-helper.Tpo -c -o libguestfs_supermin_helper-libguestfs-supermin-helper.obj `if test -f 'libguestfs-supermin-helper.c'; then $(CYGPATH_W) 'libguestfs-supermin-helper.c'; else $(CYGPATH_W) '$(srcdir)/libguestfs-supermin-helper.c'; fi`
+-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/libguestfs_supermin_helper-libguestfs-supermin-helper.Tpo $(DEPDIR)/libguestfs_supermin_helper-libguestfs-supermin-helper.Po
+-@am__fastdepCC_FALSE@	$(AM_V_CC) @AM_BACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='libguestfs-supermin-helper.c' object='libguestfs_supermin_helper-libguestfs-supermin-helper.obj' libtool=no @AMDEPBACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+-@am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libguestfs_supermin_helper_CFLAGS) $(CFLAGS) -c -o libguestfs_supermin_helper-libguestfs-supermin-helper.obj `if test -f 'libguestfs-supermin-helper.c'; then $(CYGPATH_W) 'libguestfs-supermin-helper.c'; else $(CYGPATH_W) '$(srcdir)/libguestfs-supermin-helper.c'; fi`
+-
+-libguestfs_supermin_helper-xalloc-die.o: ../gnulib/lib/xalloc-die.c
+-@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libguestfs_supermin_helper_CFLAGS) $(CFLAGS) -MT libguestfs_supermin_helper-xalloc-die.o -MD -MP -MF $(DEPDIR)/libguestfs_supermin_helper-xalloc-die.Tpo -c -o libguestfs_supermin_helper-xalloc-die.o `test -f '../gnulib/lib/xalloc-die.c' || echo '$(srcdir)/'`../gnulib/lib/xalloc-die.c
+-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/libguestfs_supermin_helper-xalloc-die.Tpo $(DEPDIR)/libguestfs_supermin_helper-xalloc-die.Po
+-@am__fastdepCC_FALSE@	$(AM_V_CC) @AM_BACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='../gnulib/lib/xalloc-die.c' object='libguestfs_supermin_helper-xalloc-die.o' libtool=no @AMDEPBACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+-@am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libguestfs_supermin_helper_CFLAGS) $(CFLAGS) -c -o libguestfs_supermin_helper-xalloc-die.o `test -f '../gnulib/lib/xalloc-die.c' || echo '$(srcdir)/'`../gnulib/lib/xalloc-die.c
+-
+-libguestfs_supermin_helper-xalloc-die.obj: ../gnulib/lib/xalloc-die.c
+-@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libguestfs_supermin_helper_CFLAGS) $(CFLAGS) -MT libguestfs_supermin_helper-xalloc-die.obj -MD -MP -MF $(DEPDIR)/libguestfs_supermin_helper-xalloc-die.Tpo -c -o libguestfs_supermin_helper-xalloc-die.obj `if test -f '../gnulib/lib/xalloc-die.c'; then $(CYGPATH_W) '../gnulib/lib/xalloc-die.c'; else $(CYGPATH_W) '$(srcdir)/../gnulib/lib/xalloc-die.c'; fi`
+-@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/libguestfs_supermin_helper-xalloc-die.Tpo $(DEPDIR)/libguestfs_supermin_helper-xalloc-die.Po
+-@am__fastdepCC_FALSE@	$(AM_V_CC) @AM_BACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='../gnulib/lib/xalloc-die.c' object='libguestfs_supermin_helper-xalloc-die.obj' libtool=no @AMDEPBACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+-@am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libguestfs_supermin_helper_CFLAGS) $(CFLAGS) -c -o libguestfs_supermin_helper-xalloc-die.obj `if test -f '../gnulib/lib/xalloc-die.c'; then $(CYGPATH_W) '../gnulib/lib/xalloc-die.c'; else $(CYGPATH_W) '$(srcdir)/../gnulib/lib/xalloc-die.c'; fi`
+ 
+ mostlyclean-libtool:
+ 	-rm -f *.lo
+@@ -1183,58 +1017,32 @@
+ 	test -n "$$files" || exit 0; \
+ 	echo " ( cd '$(DESTDIR)$(fsdir)' && rm -f" $$files ")"; \
+ 	cd "$(DESTDIR)$(fsdir)" && rm -f $$files
++install-superminfsDATA: $(superminfs_DATA)
++	@$(NORMAL_INSTALL)
++	test -z "$(superminfsdir)" || $(MKDIR_P) "$(DESTDIR)$(superminfsdir)"
++	@list='$(superminfs_DATA)'; test -n "$(superminfsdir)" || list=; \
++	for p in $$list; do \
++	  if test -f "$$p"; then d=; else d="$(srcdir)/"; fi; \
++	  echo "$$d$$p"; \
++	done | $(am__base_list) | \
++	while read files; do \
++	  echo " $(INSTALL_DATA) $$files '$(DESTDIR)$(superminfsdir)'"; \
++	  $(INSTALL_DATA) $$files "$(DESTDIR)$(superminfsdir)" || exit $$?; \
++	done
+ 
+-ID: $(HEADERS) $(SOURCES) $(LISP) $(TAGS_FILES)
+-	list='$(SOURCES) $(HEADERS) $(LISP) $(TAGS_FILES)'; \
+-	unique=`for i in $$list; do \
+-	    if test -f "$$i"; then echo $$i; else echo $(srcdir)/$$i; fi; \
+-	  done | \
+-	  $(AWK) '{ files[$$0] = 1; nonempty = 1; } \
+-	      END { if (nonempty) { for (i in files) print i; }; }'`; \
+-	mkid -fID $$unique
++uninstall-superminfsDATA:
++	@$(NORMAL_UNINSTALL)
++	@list='$(superminfs_DATA)'; test -n "$(superminfsdir)" || list=; \
++	files=`for p in $$list; do echo $$p; done | sed -e 's|^.*/||'`; \
++	test -n "$$files" || exit 0; \
++	echo " ( cd '$(DESTDIR)$(superminfsdir)' && rm -f" $$files ")"; \
++	cd "$(DESTDIR)$(superminfsdir)" && rm -f $$files
+ tags: TAGS
++TAGS:
+ 
+-TAGS:  $(HEADERS) $(SOURCES)  $(TAGS_DEPENDENCIES) \
+-		$(TAGS_FILES) $(LISP)
+-	set x; \
+-	here=`pwd`; \
+-	list='$(SOURCES) $(HEADERS)  $(LISP) $(TAGS_FILES)'; \
+-	unique=`for i in $$list; do \
+-	    if test -f "$$i"; then echo $$i; else echo $(srcdir)/$$i; fi; \
+-	  done | \
+-	  $(AWK) '{ files[$$0] = 1; nonempty = 1; } \
+-	      END { if (nonempty) { for (i in files) print i; }; }'`; \
+-	shift; \
+-	if test -z "$(ETAGS_ARGS)$$*$$unique"; then :; else \
+-	  test -n "$$unique" || unique=$$empty_fix; \
+-	  if test $$# -gt 0; then \
+-	    $(ETAGS) $(ETAGSFLAGS) $(AM_ETAGSFLAGS) $(ETAGS_ARGS) \
+-	      "$$@" $$unique; \
+-	  else \
+-	    $(ETAGS) $(ETAGSFLAGS) $(AM_ETAGSFLAGS) $(ETAGS_ARGS) \
+-	      $$unique; \
+-	  fi; \
+-	fi
+ ctags: CTAGS
+-CTAGS:  $(HEADERS) $(SOURCES)  $(TAGS_DEPENDENCIES) \
+-		$(TAGS_FILES) $(LISP)
+-	list='$(SOURCES) $(HEADERS)  $(LISP) $(TAGS_FILES)'; \
+-	unique=`for i in $$list; do \
+-	    if test -f "$$i"; then echo $$i; else echo $(srcdir)/$$i; fi; \
+-	  done | \
+-	  $(AWK) '{ files[$$0] = 1; nonempty = 1; } \
+-	      END { if (nonempty) { for (i in files) print i; }; }'`; \
+-	test -z "$(CTAGS_ARGS)$$unique" \
+-	  || $(CTAGS) $(CTAGSFLAGS) $(AM_CTAGSFLAGS) $(CTAGS_ARGS) \
+-	     $$unique
+-
+-GTAGS:
+-	here=`$(am__cd) $(top_builddir) && pwd` \
+-	  && $(am__cd) $(top_srcdir) \
+-	  && gtags -i $(GTAGS_ARGS) "$$here"
++CTAGS:
+ 
+-distclean-tags:
+-	-rm -f TAGS ID GTAGS GRTAGS GSYMS GPATH tags
+ 
+ distdir: $(DISTFILES)
+ 	@srcdirstrip=`echo "$(srcdir)" | sed 's/[].[^$$\\*]/\\\\&/g'`; \
+@@ -1268,9 +1076,9 @@
+ 	done
+ check-am: all-am
+ check: check-am
+-all-am: Makefile $(PROGRAMS) $(DATA)
++all-am: Makefile $(DATA)
+ installdirs:
+-	for dir in "$(DESTDIR)$(bindir)" "$(DESTDIR)$(fsdir)"; do \
++	for dir in "$(DESTDIR)$(fsdir)" "$(DESTDIR)$(superminfsdir)"; do \
+ 	  test -z "$$dir" || $(MKDIR_P) "$$dir"; \
+ 	done
+ install: install-am
+@@ -1301,14 +1109,11 @@
+ 	@echo "it deletes files that may require special tools to rebuild."
+ clean: clean-am
+ 
+-clean-am: clean-binPROGRAMS clean-generic clean-libtool clean-local \
+-	mostlyclean-am
++clean-am: clean-generic clean-libtool clean-local mostlyclean-am
+ 
+ distclean: distclean-am
+-	-rm -rf ./$(DEPDIR)
+ 	-rm -f Makefile
+-distclean-am: clean-am distclean-compile distclean-generic \
+-	distclean-tags
++distclean-am: clean-am distclean-generic
+ 
+ dvi: dvi-am
+ 
+@@ -1322,13 +1127,13 @@
+ 
+ info-am:
+ 
+-install-data-am: install-fsDATA
++install-data-am: install-fsDATA install-superminfsDATA
+ 
+ install-dvi: install-dvi-am
+ 
+ install-dvi-am:
+ 
+-install-exec-am: install-binPROGRAMS
++install-exec-am:
+ 
+ install-html: install-html-am
+ 
+@@ -1351,14 +1156,12 @@
+ installcheck-am:
+ 
+ maintainer-clean: maintainer-clean-am
+-	-rm -rf ./$(DEPDIR)
+ 	-rm -f Makefile
+ maintainer-clean-am: distclean-am maintainer-clean-generic
+ 
+ mostlyclean: mostlyclean-am
+ 
+-mostlyclean-am: mostlyclean-compile mostlyclean-generic \
+-	mostlyclean-libtool
++mostlyclean-am: mostlyclean-generic mostlyclean-libtool
+ 
+ pdf: pdf-am
+ 
+@@ -1368,24 +1171,22 @@
+ 
+ ps-am:
+ 
+-uninstall-am: uninstall-binPROGRAMS uninstall-fsDATA
++uninstall-am: uninstall-fsDATA uninstall-superminfsDATA
+ 
+ .MAKE: install-am install-strip
+ 
+-.PHONY: CTAGS GTAGS all all-am check check-am clean clean-binPROGRAMS \
+-	clean-generic clean-libtool clean-local ctags distclean \
+-	distclean-compile distclean-generic distclean-libtool \
+-	distclean-tags distdir dvi dvi-am html html-am info info-am \
+-	install install-am install-binPROGRAMS install-data \
+-	install-data-am install-dvi install-dvi-am install-exec \
+-	install-exec-am install-fsDATA install-html install-html-am \
+-	install-info install-info-am install-man install-pdf \
+-	install-pdf-am install-ps install-ps-am install-strip \
++.PHONY: all all-am check check-am clean clean-generic clean-libtool \
++	clean-local distclean distclean-generic distclean-libtool \
++	distdir dvi dvi-am html html-am info info-am install \
++	install-am install-data install-data-am install-dvi \
++	install-dvi-am install-exec install-exec-am install-fsDATA \
++	install-html install-html-am install-info install-info-am \
++	install-man install-pdf install-pdf-am install-ps \
++	install-ps-am install-strip install-superminfsDATA \
+ 	installcheck installcheck-am installdirs maintainer-clean \
+-	maintainer-clean-generic mostlyclean mostlyclean-compile \
+-	mostlyclean-generic mostlyclean-libtool pdf pdf-am ps ps-am \
+-	tags uninstall uninstall-am uninstall-binPROGRAMS \
+-	uninstall-fsDATA
++	maintainer-clean-generic mostlyclean mostlyclean-generic \
++	mostlyclean-libtool pdf pdf-am ps ps-am uninstall uninstall-am \
++	uninstall-fsDATA uninstall-superminfsDATA
+ 
+ 
+ # Define a force dependency which will always be rebuilt
+@@ -1443,18 +1244,19 @@
+ # specifically with './configure --enable-supermin'.  You really need
+ # to read the README file.
+ 
+-# First we need to decide which files go in and out of the supermin
+-# appliance.  This decision is made by 'supermin-split.sh'.
+-@SUPERMIN_TRUE@$(SUPERMINFILES): supermin.incfiles
+-@SUPERMIN_TRUE@supermin.incfiles: $(top_builddir)/initramfs/fakeroot.log $(top_builddir)/daemon/guestfsd supermin-split.sh
+-@SUPERMIN_TRUE@	rm -f supermin.incfiles $(SUPERMINFILES)
+-@SUPERMIN_TRUE@	bash supermin-split.sh
+-
+-# Second we need to create a supermin appliance with just the included
+-# files (leaving out the host files, which we'll add back at runtime).
+-@SUPERMIN_TRUE@$(SUPERMINIMG): supermin.incfiles supermin-make.sh
+-@SUPERMIN_TRUE@	rm -f $@
+-@SUPERMIN_TRUE@	bash supermin-make.sh
++@SUPERMIN_TRUE@supermin.d/base.img supermin.d/hostfiles: stamp-supermin
++@SUPERMIN_TRUE@stamp-supermin: $(INITRAMFSIMG)
++@SUPERMIN_TRUE@	mkdir -p supermin.d
++@SUPERMIN_TRUE@	rm -f $@ supermin.d/base.img supermin.d/hostfiles
++@SUPERMIN_TRUE@	febootstrap-to-supermin $(top_builddir)/initramfs supermin.d/base.img supermin.d/hostfiles
++@SUPERMIN_TRUE@	touch $@
++
++@SUPERMIN_TRUE@supermin.d/daemon.img: $(INITRAMFSIMG)
++@SUPERMIN_TRUE@	mkdir -p supermin.d
++@SUPERMIN_TRUE@	rm -f $@ $@-t
++@SUPERMIN_TRUE@	(cd $(top_builddir)/initramfs && \
++@SUPERMIN_TRUE@	  echo -e "sbin\nsbin/guestfsd" | cpio --quiet -o -H newc ) > $@-t
++@SUPERMIN_TRUE@	mv $@-t $@
+ $(debirf_symlinks:%=debian/modules/%): stamp-debirf-modules
+ stamp-debirf-modules:
+ 	mkdir -p debian/modules
+@@ -1495,6 +1297,7 @@
+ 	  -net nic,model=virtio,vlan=0
+ 
+ clean-local:
++	rm -f supermin.d/*
+ 	rm -rf $(top_builddir)/initramfs
+ 
+ # Tell versions [3.59,3.63) of GNU make to not export all variables.
+diff -urN libguestfs-1.2.7.orig/appliance/supermin-make.sh.in libguestfs-1.2.7-unify-supermin/appliance/supermin-make.sh.in
+--- libguestfs-1.2.7.orig/appliance/supermin-make.sh.in	2010-03-16 15:47:28.000000000 +0000
++++ libguestfs-1.2.7-unify-supermin/appliance/supermin-make.sh.in	1970-01-01 01:00:00.000000000 +0100
+@@ -1,36 +0,0 @@
+-#!/bin/bash -
+-# @configure_input@
+-# Copyright (C) 2009 Red Hat Inc.
+-#
+-# This program is free software; you can redistribute it and/or modify
+-# it under the terms of the GNU General Public License as published by
+-# the Free Software Foundation; either version 2 of the License, or
+-# (at your option) any later version.
+-#
+-# This program is distributed in the hope that it will be useful,
+-# but WITHOUT ANY WARRANTY; without even the implied warranty of
+-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-# GNU General Public License for more details.
+-#
+-# You should have received a copy of the GNU General Public License
+-# along with this program; if not, write to the Free Software
+-# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+-
+-# Build the supermin appliance.
+-# Read the README file!
+-
+-unset CDPATH
+-
+-set -e
+-
+-cd @top_builddir@
+-
+-output=appliance/initramfs.@REPO@.@host_cpu@.supermin.img
+-
+-# Generate final image.
+-@FEBOOTSTRAP_TO_INITRAMFS@ \
+-  --nocompress \
+-  --files=$(pwd)/appliance/supermin.incfiles \
+-  initramfs > $output-t
+-mv $output-t $output
+-ls -lh $output
+diff -urN libguestfs-1.2.7.orig/appliance/supermin-split.sh.in libguestfs-1.2.7-unify-supermin/appliance/supermin-split.sh.in
+--- libguestfs-1.2.7.orig/appliance/supermin-split.sh.in	2010-04-12 19:12:50.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/appliance/supermin-split.sh.in	1970-01-01 01:00:00.000000000 +0100
+@@ -1,133 +0,0 @@
+-#!/bin/bash -
+-# @configure_input@
+-# Copyright (C) 2009 Red Hat Inc.
+-#
+-# This program is free software; you can redistribute it and/or modify
+-# it under the terms of the GNU General Public License as published by
+-# the Free Software Foundation; either version 2 of the License, or
+-# (at your option) any later version.
+-#
+-# This program is distributed in the hope that it will be useful,
+-# but WITHOUT ANY WARRANTY; without even the implied warranty of
+-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-# GNU General Public License for more details.
+-#
+-# You should have received a copy of the GNU General Public License
+-# along with this program; if not, write to the Free Software
+-# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+-
+-# Decide which files will stay in the supermin appliance and which
+-# files will be pulled out of the host at runtime.
+-#
+-# Read the README file!
+-#
+-# The basic idea is that we create two output files, one containing
+-# the files that will stay, and the other listing the files that
+-# will be pulled from the host (ie. not go into the appliance now).
+-#
+-# The list of files that stay ('supermin.incfiles') is just a straight
+-# list of files and directories.
+-#
+-# The list of files that come from the host ('*.supermin.hostfiles')
+-# can include wildcards, to allow libraries to be upgraded on the
+-# host.
+-
+-unset CDPATH
+-
+-set -e
+-
+-cd @top_builddir@/initramfs
+-
+-incfiles=../appliance/supermin.incfiles
+-hostfiles=../appliance/initramfs.@REPO@.@host_cpu@.supermin.hostfiles
+-
+-exec 5>$incfiles
+-exec 6>$hostfiles
+-
+-# Note currently the initramfs contains ~2500 files, and none have
+-# "funny characters" in the names.  So this is reasonable just to
+-# simplify the script.
+-for path in $(find -not -name fakeroot.log); do
+-    dir=$(dirname "$path")
+-    file=$(basename "$path")
+-
+-    # For quoting problems with the bash =~ operator, see bash FAQ
+-    # question E14 here http://tiswww.case.edu/php/chet/bash/FAQ and
+-    # http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=487387#25
+-    # (RHBZ#566511).
+-    p_etc='^\./etc'
+-    p_dev='^\./dev'
+-    p_var='^\./var'
+-    p_lib_modules='^\./lib/modules/'
+-    p_builddir='^\./builddir'
+-    p_ld_so='^ld-[.0-9]+\.so$'
+-    p_libbfd='^libbfd-.*\.so$'
+-    p_libgcc='^libgcc_s-.*\.so\.([0-9]+)$'
+-    p_libntfs3g='^libntfs-3g\.so\..*$'
+-    p_lib123so='^lib(.*)-[-.0-9]+\.so$'
+-    p_lib123so123='^lib(.*)-[-.0-9]+\.so\.([0-9]+)\.'
+-    p_libso123='^lib(.*)\.so\.([0-9]+)\.'
+-
+-    # All we're going to keep are the special files /init, the daemon,
+-    # configuration files (/etc), devices and modifiable stuff (/var).
+-    if [ "$path" = "./init" -o "$file" = "guestfsd" ]; then
+-        echo "$path" >&5
+-
+-    # Get timezone configuration from local system.
+-    elif [ "$path" = "./etc/localtime" ]; then
+-        echo "$path" >&6
+-
+-    elif [[ "$path" =~ $p_etc || "$path" =~ $p_dev || "$path" =~ $p_var ]]
+-    then
+-        echo "$path" >&5
+-
+-    # Kernel modules are always copied in from the host, including all
+-    # the dependency files.
+-    elif [[ "$path" =~ $p_lib_modules ]]; then
+-        :
+-
+-    # On mock/Koji, exclude bogus /builddir directory which for some
+-    # reason contains some yum temporary files (RHBZ#566512).
+-    elif [[ "$path" =~ $p_builddir ]]; then
+-        :
+-
+-    elif [ -d "$path" ]; then
+-        # Always write directory names to both output files.
+-        echo "$path" >&5
+-        echo "$path" >&6
+-
+-    # Some libraries need fixed version numbers replaced by wildcards.
+-
+-    elif [[ "$file" =~ $p_ld_so ]]; then
+-        echo "$dir/ld-*.so" >&6
+-
+-    # Special case for libbfd
+-    elif [[ "$file" =~ $p_libbfd ]]; then
+-        echo "$dir/libbfd-*.so" >&6
+-
+-    # Special case for libgcc_s-<gccversion>-<date>.so.N
+-    elif [[ "$file" =~ $p_libgcc ]]; then
+-        echo "$dir/libgcc_s-*.so.${BASH_REMATCH[1]}" >&6
+-
+-    # Special case for libntfs-3g.so.*
+-    elif [[ "$file" =~ $p_libntfs3g ]]; then
+-        [ -n "$libntfs3g_once" ] || echo "$dir/libntfs-3g.so.*" >&6
+-        libntfs3g_once=1
+-
+-    # libfoo-1.2.3.so
+-    elif [[ "$file" =~ $p_lib123so ]]; then
+-        echo "$dir/lib${BASH_REMATCH[1]}-*.so" >&6
+-
+-    # libfoo-1.2.3.so.1.2.3 (but NOT '*.so.N')
+-    elif [[ "$file" =~ $p_lib123so123 ]]; then
+-        echo "$dir/lib${BASH_REMATCH[1]}-*.so.${BASH_REMATCH[2]}.*" >&6
+-
+-    # libfoo.so.1.2.3 (but NOT '*.so.N')
+-    elif [[ "$file" =~ $p_libso123 ]]; then
+-        echo "$dir/lib${BASH_REMATCH[1]}.so.${BASH_REMATCH[2]}.*" >&6
+-
+-    else
+-        # Anything else comes from the host directly.
+-        echo "$path" >&6
+-    fi
+-done
+diff -urN libguestfs-1.2.7.orig/capitests/Makefile.in libguestfs-1.2.7-unify-supermin/capitests/Makefile.in
+--- libguestfs-1.2.7.orig/capitests/Makefile.in	2010-05-17 11:18:07.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/capitests/Makefile.in	2010-05-17 18:26:52.840173504 +0100
+@@ -256,6 +256,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/configure libguestfs-1.2.7-unify-supermin/configure
+--- libguestfs-1.2.7.orig/configure	2010-05-17 11:18:11.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/configure	2010-05-17 18:27:00.890173074 +0100
+@@ -844,6 +844,7 @@
+ DEBIRF
+ DEBOOTSTRAP
+ FAKECHROOT
++FEBOOTSTRAP_TO_SUPERMIN
+ FEBOOTSTRAP_TO_INITRAMFS
+ FEBOOTSTRAP_MINIMIZE
+ FEBOOTSTRAP_INSTALL
+@@ -23652,13 +23653,13 @@
+ else
+   lt_cv_nm_interface="BSD nm"
+   echo "int some_variable = 0;" > conftest.$ac_ext
+-  (eval echo "\"\$as_me:23655: $ac_compile\"" >&5)
++  (eval echo "\"\$as_me:23656: $ac_compile\"" >&5)
+   (eval "$ac_compile" 2>conftest.err)
+   cat conftest.err >&5
+-  (eval echo "\"\$as_me:23658: $NM \\\"conftest.$ac_objext\\\"\"" >&5)
++  (eval echo "\"\$as_me:23659: $NM \\\"conftest.$ac_objext\\\"\"" >&5)
+   (eval "$NM \"conftest.$ac_objext\"" 2>conftest.err > conftest.out)
+   cat conftest.err >&5
+-  (eval echo "\"\$as_me:23661: output\"" >&5)
++  (eval echo "\"\$as_me:23662: output\"" >&5)
+   cat conftest.out >&5
+   if $GREP 'External.*some_variable' conftest.out > /dev/null; then
+     lt_cv_nm_interface="MS dumpbin"
+@@ -24863,7 +24864,7 @@
+   ;;
+ *-*-irix6*)
+   # Find out which ABI we are using.
+-  echo '#line 24866 "configure"' > conftest.$ac_ext
++  echo '#line 24867 "configure"' > conftest.$ac_ext
+   if { { eval echo "\"\$as_me\":${as_lineno-$LINENO}: \"$ac_compile\""; } >&5
+   (eval $ac_compile) 2>&5
+   ac_status=$?
+@@ -26125,11 +26126,11 @@
+    -e 's:.*FLAGS}\{0,1\} :&$lt_compiler_flag :; t' \
+    -e 's: [^ ]*conftest\.: $lt_compiler_flag&:; t' \
+    -e 's:$: $lt_compiler_flag:'`
+-   (eval echo "\"\$as_me:26128: $lt_compile\"" >&5)
++   (eval echo "\"\$as_me:26129: $lt_compile\"" >&5)
+    (eval "$lt_compile" 2>conftest.err)
+    ac_status=$?
+    cat conftest.err >&5
+-   echo "$as_me:26132: \$? = $ac_status" >&5
++   echo "$as_me:26133: \$? = $ac_status" >&5
+    if (exit $ac_status) && test -s "$ac_outfile"; then
+      # The compiler can only warn and ignore the option if not recognized
+      # So say no if there are warnings other than the usual output.
+@@ -26464,11 +26465,11 @@
+    -e 's:.*FLAGS}\{0,1\} :&$lt_compiler_flag :; t' \
+    -e 's: [^ ]*conftest\.: $lt_compiler_flag&:; t' \
+    -e 's:$: $lt_compiler_flag:'`
+-   (eval echo "\"\$as_me:26467: $lt_compile\"" >&5)
++   (eval echo "\"\$as_me:26468: $lt_compile\"" >&5)
+    (eval "$lt_compile" 2>conftest.err)
+    ac_status=$?
+    cat conftest.err >&5
+-   echo "$as_me:26471: \$? = $ac_status" >&5
++   echo "$as_me:26472: \$? = $ac_status" >&5
+    if (exit $ac_status) && test -s "$ac_outfile"; then
+      # The compiler can only warn and ignore the option if not recognized
+      # So say no if there are warnings other than the usual output.
+@@ -26569,11 +26570,11 @@
+    -e 's:.*FLAGS}\{0,1\} :&$lt_compiler_flag :; t' \
+    -e 's: [^ ]*conftest\.: $lt_compiler_flag&:; t' \
+    -e 's:$: $lt_compiler_flag:'`
+-   (eval echo "\"\$as_me:26572: $lt_compile\"" >&5)
++   (eval echo "\"\$as_me:26573: $lt_compile\"" >&5)
+    (eval "$lt_compile" 2>out/conftest.err)
+    ac_status=$?
+    cat out/conftest.err >&5
+-   echo "$as_me:26576: \$? = $ac_status" >&5
++   echo "$as_me:26577: \$? = $ac_status" >&5
+    if (exit $ac_status) && test -s out/conftest2.$ac_objext
+    then
+      # The compiler can only warn and ignore the option if not recognized
+@@ -26624,11 +26625,11 @@
+    -e 's:.*FLAGS}\{0,1\} :&$lt_compiler_flag :; t' \
+    -e 's: [^ ]*conftest\.: $lt_compiler_flag&:; t' \
+    -e 's:$: $lt_compiler_flag:'`
+-   (eval echo "\"\$as_me:26627: $lt_compile\"" >&5)
++   (eval echo "\"\$as_me:26628: $lt_compile\"" >&5)
+    (eval "$lt_compile" 2>out/conftest.err)
+    ac_status=$?
+    cat out/conftest.err >&5
+-   echo "$as_me:26631: \$? = $ac_status" >&5
++   echo "$as_me:26632: \$? = $ac_status" >&5
+    if (exit $ac_status) && test -s out/conftest2.$ac_objext
+    then
+      # The compiler can only warn and ignore the option if not recognized
+@@ -28994,7 +28995,7 @@
+   lt_dlunknown=0; lt_dlno_uscore=1; lt_dlneed_uscore=2
+   lt_status=$lt_dlunknown
+   cat > conftest.$ac_ext <<_LT_EOF
+-#line 28997 "configure"
++#line 28998 "configure"
+ #include "confdefs.h"
+ 
+ #if HAVE_DLFCN_H
+@@ -29090,7 +29091,7 @@
+   lt_dlunknown=0; lt_dlno_uscore=1; lt_dlneed_uscore=2
+   lt_status=$lt_dlunknown
+   cat > conftest.$ac_ext <<_LT_EOF
+-#line 29093 "configure"
++#line 29094 "configure"
+ #include "confdefs.h"
+ 
+ #if HAVE_DLFCN_H
+@@ -31167,6 +31168,46 @@
+ 
+       test "x$FEBOOTSTRAP_TO_INITRAMFS" = "xno" && \
+           as_fn_error "febootstrap-to-initramfs must be installed" "$LINENO" 5
++      # Extract the first word of "febootstrap-to-supermin", so it can be a program name with args.
++set dummy febootstrap-to-supermin; ac_word=$2
++{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for $ac_word" >&5
++$as_echo_n "checking for $ac_word... " >&6; }
++if test "${ac_cv_prog_FEBOOTSTRAP_TO_SUPERMIN+set}" = set; then :
++  $as_echo_n "(cached) " >&6
++else
++  if test -n "$FEBOOTSTRAP_TO_SUPERMIN"; then
++  ac_cv_prog_FEBOOTSTRAP_TO_SUPERMIN="$FEBOOTSTRAP_TO_SUPERMIN" # Let the user override the test.
++else
++as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
++for as_dir in $PATH
++do
++  IFS=$as_save_IFS
++  test -z "$as_dir" && as_dir=.
++    for ac_exec_ext in '' $ac_executable_extensions; do
++  if { test -f "$as_dir/$ac_word$ac_exec_ext" && $as_test_x "$as_dir/$ac_word$ac_exec_ext"; }; then
++    ac_cv_prog_FEBOOTSTRAP_TO_SUPERMIN="febootstrap-to-supermin"
++    $as_echo "$as_me:${as_lineno-$LINENO}: found $as_dir/$ac_word$ac_exec_ext" >&5
++    break 2
++  fi
++done
++  done
++IFS=$as_save_IFS
++
++  test -z "$ac_cv_prog_FEBOOTSTRAP_TO_SUPERMIN" && ac_cv_prog_FEBOOTSTRAP_TO_SUPERMIN="no"
++fi
++fi
++FEBOOTSTRAP_TO_SUPERMIN=$ac_cv_prog_FEBOOTSTRAP_TO_SUPERMIN
++if test -n "$FEBOOTSTRAP_TO_SUPERMIN"; then
++  { $as_echo "$as_me:${as_lineno-$LINENO}: result: $FEBOOTSTRAP_TO_SUPERMIN" >&5
++$as_echo "$FEBOOTSTRAP_TO_SUPERMIN" >&6; }
++else
++  { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
++$as_echo "no" >&6; }
++fi
++
++
++      test "x$FEBOOTSTRAP_TO_SUPERMIN" = "xno" && \
++          as_fn_error "febootstrap-to-supermin must be installed" "$LINENO" 5
+ 
+                   # Extract the first word of "fakechroot", so it can be a program name with args.
+ set dummy fakechroot; ac_word=$2
+@@ -31381,46 +31422,6 @@
+ fi
+ 
+ 
+-if test "x$enable_supermin" = "xyes"; then
+-            { $as_echo "$as_me:${as_lineno-$LINENO}: checking for --files support in $FEBOOTSTRAP_TO_INITRAMFS" >&5
+-$as_echo_n "checking for --files support in $FEBOOTSTRAP_TO_INITRAMFS... " >&6; }
+-    out=`$FEBOOTSTRAP_TO_INITRAMFS 2>&1 ||:`
+-    echo "febootstrap_to_initramfs test command output: $out" >&5
+-    if ! echo "$out" | grep -sq -e --files ; then
+-        { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
+-$as_echo "no" >&6; }
+-        { { $as_echo "$as_me:${as_lineno-$LINENO}: error: in \`$ac_pwd':" >&5
+-$as_echo "$as_me: error: in \`$ac_pwd':" >&2;}
+-as_fn_error "febootstrap-to-initramfs does not support the --files option.
+-
+-To build the supermin appliance, you need to upgrade to the latest
+-version of febootstrap.
+-
+-See \`config.log' for more details." "$LINENO" 5; }
+-    fi
+-    { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+-$as_echo "yes" >&6; }
+-
+-            { $as_echo "$as_me:${as_lineno-$LINENO}: checking for --nocompress support in $FEBOOTSTRAP_TO_INITRAMFS" >&5
+-$as_echo_n "checking for --nocompress support in $FEBOOTSTRAP_TO_INITRAMFS... " >&6; }
+-    out=`$FEBOOTSTRAP_TO_INITRAMFS 2>&1 ||:`
+-    echo "febootstrap_to_initramfs test command output: $out" >&5
+-    if ! echo "$out" | grep -sq -e --nocompress ; then
+-        { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
+-$as_echo "no" >&6; }
+-        { { $as_echo "$as_me:${as_lineno-$LINENO}: error: in \`$ac_pwd':" >&5
+-$as_echo "$as_me: error: in \`$ac_pwd':" >&2;}
+-as_fn_error "febootstrap-to-initramfs does not support the --nocompress option.
+-
+-To build the supermin appliance, you need to upgrade to the latest
+-version of febootstrap.
+-
+-See \`config.log' for more details." "$LINENO" 5; }
+-    fi
+-    { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+-$as_echo "yes" >&6; }
+-fi
+-
+ # Check whether --enable-packet-dump was given.
+ if test "${enable_packet_dump+set}" = set; then :
+   enableval=$enable_packet_dump;
+@@ -35152,10 +35153,6 @@
+ 
+ ac_config_files="$ac_config_files appliance/update.sh"
+ 
+-ac_config_files="$ac_config_files appliance/supermin-split.sh"
+-
+-ac_config_files="$ac_config_files appliance/supermin-make.sh"
+-
+ ac_config_files="$ac_config_files Makefile src/Makefile fish/Makefile po/Makefile.in examples/Makefile appliance/Makefile appliance/debian/debirf.conf images/Makefile capitests/Makefile regressions/Makefile test-tool/Makefile ocaml/Makefile ocaml/examples/Makefile perl/Makefile python/Makefile ruby/Makefile ruby/Rakefile java/Makefile haskell/Makefile inspector/Makefile tools/Makefile libguestfs.pc gnulib/lib/Makefile gnulib/tests/Makefile fuse/Makefile ocaml/META perl/Makefile.PL"
+ 
+ cat >confcache <<\_ACEOF
+@@ -36249,8 +36246,6 @@
+     "po-directories") CONFIG_COMMANDS="$CONFIG_COMMANDS po-directories" ;;
+     "config.h") CONFIG_HEADERS="$CONFIG_HEADERS config.h" ;;
+     "appliance/update.sh") CONFIG_FILES="$CONFIG_FILES appliance/update.sh" ;;
+-    "appliance/supermin-split.sh") CONFIG_FILES="$CONFIG_FILES appliance/supermin-split.sh" ;;
+-    "appliance/supermin-make.sh") CONFIG_FILES="$CONFIG_FILES appliance/supermin-make.sh" ;;
+     "Makefile") CONFIG_FILES="$CONFIG_FILES Makefile" ;;
+     "src/Makefile") CONFIG_FILES="$CONFIG_FILES src/Makefile" ;;
+     "fish/Makefile") CONFIG_FILES="$CONFIG_FILES fish/Makefile" ;;
+@@ -37738,8 +37733,6 @@
+       esac
+     done ;;
+     "appliance/update.sh":F) chmod +x appliance/update.sh ;;
+-    "appliance/supermin-split.sh":F) chmod +x appliance/supermin-split.sh ;;
+-    "appliance/supermin-make.sh":F) chmod +x appliance/supermin-make.sh ;;
+ 
+   esac
+ done # for ac_tag
+diff -urN libguestfs-1.2.7.orig/configure.ac libguestfs-1.2.7-unify-supermin/configure.ac
+--- libguestfs-1.2.7.orig/configure.ac	2010-05-17 11:16:25.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/configure.ac	2010-05-17 18:22:28.388206206 +0100
+@@ -305,6 +305,10 @@
+                     [febootstrap-to-initramfs],[febootstrap-to-initramfs],[no])
+       test "x$FEBOOTSTRAP_TO_INITRAMFS" = "xno" && \
+           AC_MSG_ERROR([febootstrap-to-initramfs must be installed])
++      AC_CHECK_PROG([FEBOOTSTRAP_TO_SUPERMIN],
++                    [febootstrap-to-supermin],[febootstrap-to-supermin],[no])
++      test "x$FEBOOTSTRAP_TO_SUPERMIN" = "xno" && \
++          AC_MSG_ERROR([febootstrap-to-supermin must be installed])
+ 
+       dnl Check we have fakechroot >= 2.9 (it's an indirect requirement
+       dnl of febootstrap, but old versions will fail with yum).
+@@ -391,40 +395,6 @@
+         [enable_supermin=no])
+ AM_CONDITIONAL([SUPERMIN],[test "x$enable_supermin" = "xyes"])
+ 
+-if test "x$enable_supermin" = "xyes"; then
+-    dnl Check febootstrap-to-initramfs accepts the --files option
+-    dnl (febootstrap >= 2.2).
+-    AC_MSG_CHECKING([for --files support in $FEBOOTSTRAP_TO_INITRAMFS])
+-    out=`$FEBOOTSTRAP_TO_INITRAMFS 2>&1 ||:`
+-    echo "febootstrap_to_initramfs test command output: $out" >&AS_MESSAGE_LOG_FD
+-    if ! echo "$out" | grep -sq -e --files ; then
+-        AC_MSG_RESULT([no])
+-        AC_MSG_FAILURE(
+-[febootstrap-to-initramfs does not support the --files option.
+-
+-To build the supermin appliance, you need to upgrade to the latest
+-version of febootstrap.
+-])
+-    fi
+-    AC_MSG_RESULT([yes])
+-
+-    dnl Check febootstrap-to-initramfs accepts the --nocompress option
+-    dnl (febootstrap >= 2.3).
+-    AC_MSG_CHECKING([for --nocompress support in $FEBOOTSTRAP_TO_INITRAMFS])
+-    out=`$FEBOOTSTRAP_TO_INITRAMFS 2>&1 ||:`
+-    echo "febootstrap_to_initramfs test command output: $out" >&AS_MESSAGE_LOG_FD
+-    if ! echo "$out" | grep -sq -e --nocompress ; then
+-        AC_MSG_RESULT([no])
+-        AC_MSG_FAILURE(
+-[febootstrap-to-initramfs does not support the --nocompress option.
+-
+-To build the supermin appliance, you need to upgrade to the latest
+-version of febootstrap.
+-])
+-    fi
+-    AC_MSG_RESULT([yes])
+-fi
+-
+ dnl Enable packet dumps when in verbose mode.  This generates lots
+ dnl of debug info, only useful for people debugging the RPC mechanism.
+ AC_ARG_ENABLE([packet-dump],
+@@ -761,10 +731,6 @@
+ dnl http://www.mail-archive.com/automake@gnu.org/msg10204.html
+ AC_CONFIG_FILES([appliance/update.sh],
+                 [chmod +x appliance/update.sh])
+-AC_CONFIG_FILES([appliance/supermin-split.sh],
+-                [chmod +x appliance/supermin-split.sh])
+-AC_CONFIG_FILES([appliance/supermin-make.sh],
+-                [chmod +x appliance/supermin-make.sh])
+ AC_CONFIG_FILES([Makefile
+                  src/Makefile fish/Makefile po/Makefile.in examples/Makefile
+                  appliance/Makefile
+diff -urN libguestfs-1.2.7.orig/examples/Makefile.in libguestfs-1.2.7-unify-supermin/examples/Makefile.in
+--- libguestfs-1.2.7.orig/examples/Makefile.in	2010-05-17 11:18:07.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/examples/Makefile.in	2010-05-17 18:26:52.950172732 +0100
+@@ -237,6 +237,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/fish/Makefile.in libguestfs-1.2.7-unify-supermin/fish/Makefile.in
+--- libguestfs-1.2.7.orig/fish/Makefile.in	2010-05-17 11:18:08.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/fish/Makefile.in	2010-05-17 18:26:53.129172682 +0100
+@@ -294,6 +294,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/fuse/Makefile.in libguestfs-1.2.7-unify-supermin/fuse/Makefile.in
+--- libguestfs-1.2.7.orig/fuse/Makefile.in	2010-05-17 18:20:12.309297646 +0100
++++ libguestfs-1.2.7-unify-supermin/fuse/Makefile.in	2010-05-17 18:26:53.245172615 +0100
+@@ -233,8 +233,6 @@
+ DATA = $(noinst_DATA)
+ ETAGS = etags
+ CTAGS = ctags
+-am__tty_colors = \
+-red=; grn=; lgn=; blu=; std=
+ DISTFILES = $(DIST_COMMON) $(DIST_SOURCES) $(TEXINFOS) $(EXTRA_DIST)
+ ACLOCAL = @ACLOCAL@
+ ALLOCA = @ALLOCA@
+@@ -284,6 +282,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+@@ -981,12 +980,6 @@
+ @HAVE_FUSE_TRUE@noinst_DATA = \
+ @HAVE_FUSE_TRUE@	$(top_builddir)/html/guestmount.1.html
+ 
+-
+-# Tests.
+-#@HAVE_FUSE_TRUE@TESTS = test-fuse.sh
+-#@HAVE_FUSE_TRUE@TESTS_ENVIRONMENT = \
+-#@HAVE_FUSE_TRUE@	top_builddir=..
+-
+ all: all-am
+ 
+ .SUFFIXES:
+@@ -1229,98 +1222,6 @@
+ distclean-tags:
+ 	-rm -f TAGS ID GTAGS GRTAGS GSYMS GPATH tags
+ 
+-check-TESTS: $(TESTS)
+-	@failed=0; all=0; xfail=0; xpass=0; skip=0; \
+-	srcdir=$(srcdir); export srcdir; \
+-	list=' $(TESTS) '; \
+-	$(am__tty_colors); \
+-	if test -n "$$list"; then \
+-	  for tst in $$list; do \
+-	    if test -f ./$$tst; then dir=./; \
+-	    elif test -f $$tst; then dir=; \
+-	    else dir="$(srcdir)/"; fi; \
+-	    if $(TESTS_ENVIRONMENT) $${dir}$$tst; then \
+-	      all=`expr $$all + 1`; \
+-	      case " $(XFAIL_TESTS) " in \
+-	      *[\ \	]$$tst[\ \	]*) \
+-		xpass=`expr $$xpass + 1`; \
+-		failed=`expr $$failed + 1`; \
+-		col=$$red; res=XPASS; \
+-	      ;; \
+-	      *) \
+-		col=$$grn; res=PASS; \
+-	      ;; \
+-	      esac; \
+-	    elif test $$? -ne 77; then \
+-	      all=`expr $$all + 1`; \
+-	      case " $(XFAIL_TESTS) " in \
+-	      *[\ \	]$$tst[\ \	]*) \
+-		xfail=`expr $$xfail + 1`; \
+-		col=$$lgn; res=XFAIL; \
+-	      ;; \
+-	      *) \
+-		failed=`expr $$failed + 1`; \
+-		col=$$red; res=FAIL; \
+-	      ;; \
+-	      esac; \
+-	    else \
+-	      skip=`expr $$skip + 1`; \
+-	      col=$$blu; res=SKIP; \
+-	    fi; \
+-	    echo "$${col}$$res$${std}: $$tst"; \
+-	  done; \
+-	  if test "$$all" -eq 1; then \
+-	    tests="test"; \
+-	    All=""; \
+-	  else \
+-	    tests="tests"; \
+-	    All="All "; \
+-	  fi; \
+-	  if test "$$failed" -eq 0; then \
+-	    if test "$$xfail" -eq 0; then \
+-	      banner="$$All$$all $$tests passed"; \
+-	    else \
+-	      if test "$$xfail" -eq 1; then failures=failure; else failures=failures; fi; \
+-	      banner="$$All$$all $$tests behaved as expected ($$xfail expected $$failures)"; \
+-	    fi; \
+-	  else \
+-	    if test "$$xpass" -eq 0; then \
+-	      banner="$$failed of $$all $$tests failed"; \
+-	    else \
+-	      if test "$$xpass" -eq 1; then passes=pass; else passes=passes; fi; \
+-	      banner="$$failed of $$all $$tests did not behave as expected ($$xpass unexpected $$passes)"; \
+-	    fi; \
+-	  fi; \
+-	  dashes="$$banner"; \
+-	  skipped=""; \
+-	  if test "$$skip" -ne 0; then \
+-	    if test "$$skip" -eq 1; then \
+-	      skipped="($$skip test was not run)"; \
+-	    else \
+-	      skipped="($$skip tests were not run)"; \
+-	    fi; \
+-	    test `echo "$$skipped" | wc -c` -le `echo "$$banner" | wc -c` || \
+-	      dashes="$$skipped"; \
+-	  fi; \
+-	  report=""; \
+-	  if test "$$failed" -ne 0 && test -n "$(PACKAGE_BUGREPORT)"; then \
+-	    report="Please report to $(PACKAGE_BUGREPORT)"; \
+-	    test `echo "$$report" | wc -c` -le `echo "$$banner" | wc -c` || \
+-	      dashes="$$report"; \
+-	  fi; \
+-	  dashes=`echo "$$dashes" | sed s/./=/g`; \
+-	  if test "$$failed" -eq 0; then \
+-	    echo "$$grn$$dashes"; \
+-	  else \
+-	    echo "$$red$$dashes"; \
+-	  fi; \
+-	  echo "$$banner"; \
+-	  test -z "$$skipped" || echo "$$skipped"; \
+-	  test -z "$$report" || echo "$$report"; \
+-	  echo "$$dashes$$std"; \
+-	  test "$$failed" -eq 0; \
+-	else :; fi
+-
+ distdir: $(DISTFILES)
+ 	@list='$(MANS)'; if test -n "$$list"; then \
+ 	  list=`for p in $$list; do \
+@@ -1365,7 +1266,6 @@
+ 	  fi; \
+ 	done
+ check-am: all-am
+-	$(MAKE) $(AM_MAKEFLAGS) check-TESTS
+ check: check-am
+ all-am: Makefile $(PROGRAMS) $(MANS) $(DATA)
+ installdirs:
+@@ -1469,22 +1369,22 @@
+ 
+ uninstall-man: uninstall-man1
+ 
+-.MAKE: check-am install-am install-strip
++.MAKE: install-am install-strip
+ 
+-.PHONY: CTAGS GTAGS all all-am check check-TESTS check-am clean \
+-	clean-binPROGRAMS clean-generic clean-libtool ctags distclean \
+-	distclean-compile distclean-generic distclean-libtool \
+-	distclean-tags distdir dvi dvi-am html html-am info info-am \
+-	install install-am install-binPROGRAMS install-data \
+-	install-data-am install-dvi install-dvi-am install-exec \
+-	install-exec-am install-html install-html-am install-info \
+-	install-info-am install-man install-man1 install-pdf \
+-	install-pdf-am install-ps install-ps-am install-strip \
+-	installcheck installcheck-am installdirs maintainer-clean \
+-	maintainer-clean-generic mostlyclean mostlyclean-compile \
+-	mostlyclean-generic mostlyclean-libtool pdf pdf-am ps ps-am \
+-	tags uninstall uninstall-am uninstall-binPROGRAMS \
+-	uninstall-man uninstall-man1
++.PHONY: CTAGS GTAGS all all-am check check-am clean clean-binPROGRAMS \
++	clean-generic clean-libtool ctags distclean distclean-compile \
++	distclean-generic distclean-libtool distclean-tags distdir dvi \
++	dvi-am html html-am info info-am install install-am \
++	install-binPROGRAMS install-data install-data-am install-dvi \
++	install-dvi-am install-exec install-exec-am install-html \
++	install-html-am install-info install-info-am install-man \
++	install-man1 install-pdf install-pdf-am install-ps \
++	install-ps-am install-strip installcheck installcheck-am \
++	installdirs maintainer-clean maintainer-clean-generic \
++	mostlyclean mostlyclean-compile mostlyclean-generic \
++	mostlyclean-libtool pdf pdf-am ps ps-am tags uninstall \
++	uninstall-am uninstall-binPROGRAMS uninstall-man \
++	uninstall-man1
+ 
+ 
+ # Define a force dependency which will always be rebuilt
+@@ -1525,6 +1425,12 @@
+ @HAVE_FUSE_TRUE@	  --outfile html/guestmount.1.html \
+ @HAVE_FUSE_TRUE@	  fuse/guestmount.pod
+ 
++# Tests.
++
++#TESTS = test-fuse.sh
++#TESTS_ENVIRONMENT = \
++#	top_builddir=..
++
+ # Tell versions [3.59,3.63) of GNU make to not export all variables.
+ # Otherwise a system limit (for SysV at least) may be exceeded.
+ .NOEXPORT:
+diff -urN libguestfs-1.2.7.orig/.gitignore libguestfs-1.2.7-unify-supermin/.gitignore
+--- libguestfs-1.2.7.orig/.gitignore	2010-05-14 17:23:44.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/.gitignore	2010-05-17 18:22:28.383423202 +0100
+@@ -9,16 +9,12 @@
+ appliance/debian/vmlinuz-*
+ appliance/debian/debirf.conf
+ appliance/initramfs.*.img
+-appliance/initramfs.*.supermin.hostfiles
+ appliance/kmod.whitelist
+-appliance/libguestfs-supermin-helper
+-appliance/libguestfs-supermin-helper.old
+ appliance/make.sh
+ appliance/packagelist
+ appliance/stamp-debirf-modules
+-appliance/supermin.incfiles
+-appliance/supermin-make.sh
+-appliance/supermin-split.sh
++appliance/stamp-supermin
++appliance/supermin.d
+ appliance/update.sh
+ appliance/vmlinuz.*
+ autom4te.cache
+diff -urN libguestfs-1.2.7.orig/gnulib/lib/Makefile.in libguestfs-1.2.7-unify-supermin/gnulib/lib/Makefile.in
+--- libguestfs-1.2.7.orig/gnulib/lib/Makefile.in	2010-05-17 11:18:08.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/gnulib/lib/Makefile.in	2010-05-17 18:26:53.416173027 +0100
+@@ -271,6 +271,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/gnulib/tests/Makefile.in libguestfs-1.2.7-unify-supermin/gnulib/tests/Makefile.in
+--- libguestfs-1.2.7.orig/gnulib/tests/Makefile.in	2010-05-17 11:18:08.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/gnulib/tests/Makefile.in	2010-05-17 18:26:53.665172963 +0100
+@@ -753,6 +753,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/haskell/Makefile.in libguestfs-1.2.7-unify-supermin/haskell/Makefile.in
+--- libguestfs-1.2.7.orig/haskell/Makefile.in	2010-05-17 11:18:08.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/haskell/Makefile.in	2010-05-17 18:26:53.765172577 +0100
+@@ -217,6 +217,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/images/Makefile.in libguestfs-1.2.7-unify-supermin/images/Makefile.in
+--- libguestfs-1.2.7.orig/images/Makefile.in	2010-05-17 11:18:08.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/images/Makefile.in	2010-05-17 18:26:53.863172997 +0100
+@@ -217,6 +217,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/inspector/Makefile.in libguestfs-1.2.7-unify-supermin/inspector/Makefile.in
+--- libguestfs-1.2.7.orig/inspector/Makefile.in	2010-05-17 11:18:08.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/inspector/Makefile.in	2010-05-17 18:26:53.971173416 +0100
+@@ -247,6 +247,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/java/Makefile.in libguestfs-1.2.7-unify-supermin/java/Makefile.in
+--- libguestfs-1.2.7.orig/java/Makefile.in	2010-05-17 11:18:09.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/java/Makefile.in	2010-05-17 18:26:54.092172767 +0100
+@@ -304,6 +304,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/Makefile.in libguestfs-1.2.7-unify-supermin/Makefile.in
+--- libguestfs-1.2.7.orig/Makefile.in	2010-05-17 11:18:10.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/Makefile.in	2010-05-17 18:26:55.180173203 +0100
+@@ -315,6 +315,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/ocaml/examples/Makefile.in libguestfs-1.2.7-unify-supermin/ocaml/examples/Makefile.in
+--- libguestfs-1.2.7.orig/ocaml/examples/Makefile.in	2010-05-17 11:18:09.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/ocaml/examples/Makefile.in	2010-05-17 18:26:54.293172958 +0100
+@@ -183,6 +183,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/ocaml/Makefile.in libguestfs-1.2.7-unify-supermin/ocaml/Makefile.in
+--- libguestfs-1.2.7.orig/ocaml/Makefile.in	2010-05-17 11:18:09.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/ocaml/Makefile.in	2010-05-17 18:26:54.197173087 +0100
+@@ -221,6 +221,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/perl/Makefile.in libguestfs-1.2.7-unify-supermin/perl/Makefile.in
+--- libguestfs-1.2.7.orig/perl/Makefile.in	2010-05-17 11:18:09.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/perl/Makefile.in	2010-05-17 18:26:54.392173264 +0100
+@@ -217,6 +217,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/po/POTFILES.in libguestfs-1.2.7-unify-supermin/po/POTFILES.in
+--- libguestfs-1.2.7.orig/po/POTFILES.in	2010-05-17 12:07:41.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/po/POTFILES.in	2010-05-17 18:22:28.389206860 +0100
+@@ -1,4 +1,3 @@
+-appliance/libguestfs-supermin-helper.c
+ daemon/augeas.c
+ daemon/available.c
+ daemon/blkid.c
+diff -urN libguestfs-1.2.7.orig/python/Makefile.in libguestfs-1.2.7-unify-supermin/python/Makefile.in
+--- libguestfs-1.2.7.orig/python/Makefile.in	2010-05-17 11:18:09.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/python/Makefile.in	2010-05-17 18:26:54.507173413 +0100
+@@ -279,6 +279,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/README libguestfs-1.2.7-unify-supermin/README
+--- libguestfs-1.2.7.orig/README	2010-04-12 19:08:50.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/README	2010-05-17 18:22:28.384422848 +0100
+@@ -40,7 +40,7 @@
+ - recent QEMU >= 0.10 with vmchannel support
+   http://lists.gnu.org/archive/html/qemu-devel/2009-02/msg01042.html
+ 
+-- febootstrap >= 2.3
++- febootstrap >= 2.7
+ 
+ - fakeroot
+ 
+diff -urN libguestfs-1.2.7.orig/regressions/Makefile.in libguestfs-1.2.7-unify-supermin/regressions/Makefile.in
+--- libguestfs-1.2.7.orig/regressions/Makefile.in	2010-05-17 11:18:09.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/regressions/Makefile.in	2010-05-17 18:26:54.604173641 +0100
+@@ -223,6 +223,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/ruby/Makefile.in libguestfs-1.2.7-unify-supermin/ruby/Makefile.in
+--- libguestfs-1.2.7.orig/ruby/Makefile.in	2010-05-17 11:18:09.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/ruby/Makefile.in	2010-05-17 18:26:54.701173408 +0100
+@@ -217,6 +217,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/src/guestfs.c libguestfs-1.2.7-unify-supermin/src/guestfs.c
+--- libguestfs-1.2.7.orig/src/guestfs.c	2010-05-14 17:23:44.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/src/guestfs.c	2010-05-17 18:22:28.390173341 +0100
+@@ -928,10 +928,6 @@
+ 
+ static const char *kernel_name = "vmlinuz." REPO "." host_cpu;
+ static const char *initrd_name = "initramfs." REPO "." host_cpu ".img";
+-static const char *supermin_name =
+-  "initramfs." REPO "." host_cpu ".supermin.img";
+-static const char *supermin_hostfiles_name =
+-  "initramfs." REPO "." host_cpu ".supermin.hostfiles";
+ 
+ int
+ guestfs__launch (guestfs_h *g)
+@@ -998,8 +994,7 @@
+         fprintf (stderr,
+                  "looking for supermin appliance in current directory\n");
+       if (dir_contains_files (".",
+-                              supermin_name, supermin_hostfiles_name,
+-                              "kmod.whitelist", NULL)) {
++                              "supermin.d", "kmod.whitelist", NULL)) {
+         if (build_supermin_appliance (g, ".", &kernel, &initrd) == -1)
+           return -1;
+         break;
+@@ -1011,8 +1006,7 @@
+         fprintf (stderr, "looking for supermin appliance in %s\n", pelem);
+ 
+       if (dir_contains_files (pelem,
+-                              supermin_name, supermin_hostfiles_name,
+-                              "kmod.whitelist", NULL)) {
++                              "supermin.d", "kmod.whitelist", NULL)) {
+         if (build_supermin_appliance (g, pelem, &kernel, &initrd) == -1)
+           return -1;
+         break;
+@@ -1591,11 +1585,15 @@
+   snprintf (*initrd, len+8, "%s/initrd", g->tmpdir);
+ 
+   snprintf (cmd, sizeof cmd,
+-            "PATH='%s':$PATH "
+-            "libguestfs-supermin-helper%s '%s' " host_cpu " " REPO " %s %s",
+-            path,
++            "febootstrap-supermin-helper%s "
++            "-k '%s/kmod.whitelist' "
++            "'%s/supermin.d' "
++            host_cpu " "
++            "%s %s",
+             g->verbose ? " --verbose" : "",
+-            path, *kernel, *initrd);
++            path,
++            path,
++            *kernel, *initrd);
+   if (g->verbose)
+     print_timestamped_message (g, "%s", cmd);
+ 
+diff -urN libguestfs-1.2.7.orig/src/Makefile.in libguestfs-1.2.7-unify-supermin/src/Makefile.in
+--- libguestfs-1.2.7.orig/src/Makefile.in	2010-05-17 11:18:09.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/src/Makefile.in	2010-05-17 18:26:54.833173397 +0100
+@@ -289,6 +289,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/test-tool/Makefile.in libguestfs-1.2.7-unify-supermin/test-tool/Makefile.in
+--- libguestfs-1.2.7.orig/test-tool/Makefile.in	2010-05-17 11:18:10.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/test-tool/Makefile.in	2010-05-17 18:26:54.950173436 +0100
+@@ -288,6 +288,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@
+diff -urN libguestfs-1.2.7.orig/tools/Makefile.in libguestfs-1.2.7-unify-supermin/tools/Makefile.in
+--- libguestfs-1.2.7.orig/tools/Makefile.in	2010-05-17 11:18:10.000000000 +0100
++++ libguestfs-1.2.7-unify-supermin/tools/Makefile.in	2010-05-17 18:26:55.056173619 +0100
+@@ -246,6 +246,7 @@
+ FEBOOTSTRAP_MINIMIZE = @FEBOOTSTRAP_MINIMIZE@
+ FEBOOTSTRAP_RUN = @FEBOOTSTRAP_RUN@
+ FEBOOTSTRAP_TO_INITRAMFS = @FEBOOTSTRAP_TO_INITRAMFS@
++FEBOOTSTRAP_TO_SUPERMIN = @FEBOOTSTRAP_TO_SUPERMIN@
+ FGREP = @FGREP@
+ FLOAT_H = @FLOAT_H@
+ FUSE_CFLAGS = @FUSE_CFLAGS@

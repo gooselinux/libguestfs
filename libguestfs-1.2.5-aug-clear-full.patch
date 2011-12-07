@@ -1,0 +1,702 @@
+diff -ur libguestfs-1.2.5.orig/capitests/tests.c libguestfs-1.2.5/capitests/tests.c
+--- libguestfs-1.2.5.orig/capitests/tests.c	2010-04-30 17:41:48.000000000 +0100
++++ libguestfs-1.2.5/capitests/tests.c	2010-04-30 20:42:11.927347595 +0100
+@@ -164,6 +164,7 @@
+   fprintf (stderr, "warning: \"guestfs_lvuuid\" has no tests\n");
+   fprintf (stderr, "warning: \"guestfs_vgpvuuids\" has no tests\n");
+   fprintf (stderr, "warning: \"guestfs_vglvuuids\" has no tests\n");
++  fprintf (stderr, "warning: \"guestfs_aug_clear\" has no tests\n");
+ }
+ 
+ static int test_part_get_mbr_id_0_skip (void)
+diff -ur libguestfs-1.2.5.orig/daemon/actions.h libguestfs-1.2.5/daemon/actions.h
+--- libguestfs-1.2.5.orig/daemon/actions.h	2010-04-12 19:13:30.000000000 +0100
++++ libguestfs-1.2.5/daemon/actions.h	2010-04-30 20:42:11.929358138 +0100
+@@ -253,3 +253,4 @@
+ extern int do_part_get_bootable (const char *device, int partnum);
+ extern int do_part_get_mbr_id (const char *device, int partnum);
+ extern int do_part_set_mbr_id (const char *device, int partnum, int idbyte);
++extern int do_aug_clear (const char *augpath);
+diff -ur libguestfs-1.2.5.orig/daemon/augeas.c libguestfs-1.2.5/daemon/augeas.c
+--- libguestfs-1.2.5.orig/daemon/augeas.c	2010-04-12 19:03:41.000000000 +0100
++++ libguestfs-1.2.5/daemon/augeas.c	2010-04-30 20:42:11.929358138 +0100
+@@ -210,6 +210,26 @@
+ }
+ 
+ int
++do_aug_clear (const char *path)
++{
++#ifdef HAVE_AUGEAS
++  int r;
++
++  NEED_AUG (-1);
++
++  r = aug_set (aug, path, NULL);
++  if (r == -1) {
++    reply_with_error ("Augeas clear failed");
++    return -1;
++  }
++
++  return 0;
++#else
++  NOT_AVAILABLE (-1);
++#endif
++}
++
++int
+ do_aug_insert (const char *path, const char *label, int before)
+ {
+ #ifdef HAVE_AUGEAS
+diff -ur libguestfs-1.2.5.orig/daemon/names.c libguestfs-1.2.5/daemon/names.c
+--- libguestfs-1.2.5.orig/daemon/names.c	2010-04-12 19:13:30.000000000 +0100
++++ libguestfs-1.2.5/daemon/names.c	2010-04-30 20:42:11.929358138 +0100
+@@ -257,4 +257,5 @@
+   [234] = "part_get_bootable",
+   [235] = "part_get_mbr_id",
+   [236] = "part_set_mbr_id",
++  [239] = "aug_clear",
+ };
+diff -ur libguestfs-1.2.5.orig/daemon/stubs.c libguestfs-1.2.5/daemon/stubs.c
+--- libguestfs-1.2.5.orig/daemon/stubs.c	2010-04-12 19:13:30.000000000 +0100
++++ libguestfs-1.2.5/daemon/stubs.c	2010-04-30 20:42:11.932344260 +0100
+@@ -6042,6 +6042,29 @@
+   xdr_free ((xdrproc_t) xdr_guestfs_part_set_mbr_id_args, (char *) &args);
+ }
+ 
++static void aug_clear_stub (XDR *xdr_in)
++{
++  int r;
++  struct guestfs_aug_clear_args args;
++
++  memset (&args, 0, sizeof args);
++
++  if (!xdr_guestfs_aug_clear_args (xdr_in, &args)) {
++    reply_with_error ("daemon failed to decode procedure arguments");
++    return;
++  }
++  char *augpath = args.augpath;
++
++  r = do_aug_clear (augpath);
++  if (r == -1)
++    /* do_aug_clear has already called reply_with_error */
++    goto done;
++
++  reply (NULL, NULL);
++done:
++  xdr_free ((xdrproc_t) xdr_guestfs_aug_clear_args, (char *) &args);
++}
++
+ void dispatch_incoming_message (XDR *xdr_in)
+ {
+   switch (proc_nr) {
+@@ -6738,6 +6761,9 @@
+     case GUESTFS_PROC_PART_SET_MBR_ID:
+       part_set_mbr_id_stub (xdr_in);
+       break;
++    case GUESTFS_PROC_AUG_CLEAR:
++      aug_clear_stub (xdr_in);
++      break;
+     default:
+       reply_with_error ("dispatch_incoming_message: unknown procedure number %d, set LIBGUESTFS_PATH to point to the matching libguestfs appliance directory", proc_nr);
+   }
+diff -ur libguestfs-1.2.5.orig/fish/cmds.c libguestfs-1.2.5/fish/cmds.c
+--- libguestfs-1.2.5.orig/fish/cmds.c	2010-04-30 17:41:48.000000000 +0100
++++ libguestfs-1.2.5/fish/cmds.c	2010-04-30 20:42:11.934344611 +0100
+@@ -42,6 +42,7 @@
+   printf ("%-20s %s\n", "add-drive-ro", _("add a drive in snapshot mode (read-only)"));
+   printf ("%-20s %s\n", "add-drive-ro-with-if", _("add a drive read-only specifying the QEMU block emulation to use"));
+   printf ("%-20s %s\n", "add-drive-with-if", _("add a drive specifying the QEMU block emulation to use"));
++  printf ("%-20s %s\n", "aug-clear", _("clear Augeas path"));
+   printf ("%-20s %s\n", "aug-close", _("close the current Augeas handle"));
+   printf ("%-20s %s\n", "aug-defnode", _("define an Augeas node"));
+   printf ("%-20s %s\n", "aug-defvar", _("define an Augeas variable"));
+@@ -474,7 +475,7 @@
+     pod2text ("aug-get", _("look up the value of an Augeas path"), "=head1 SYNOPSIS\n\n aug-get augpath\n\n=head1 DESCRIPTION\n\nLook up the value associated with C<path>.  If C<path>\nmatches exactly one node, the C<value> is returned.");
+   else
+   if (STRCASEEQ (cmd, "aug_set") || STRCASEEQ (cmd, "aug-set"))
+-    pod2text ("aug-set", _("set Augeas path to value"), "=head1 SYNOPSIS\n\n aug-set augpath val\n\n=head1 DESCRIPTION\n\nSet the value associated with C<path> to C<value>.");
++    pod2text ("aug-set", _("set Augeas path to value"), "=head1 SYNOPSIS\n\n aug-set augpath val\n\n=head1 DESCRIPTION\n\nSet the value associated with C<path> to C<val>.\n\nIn the Augeas API, it is possible to clear a node by setting\nthe value to NULL.  Due to an oversight in the libguestfs API\nyou cannot do that with this call.  Instead you must use the\nC<aug_clear> call.");
+   else
+   if (STRCASEEQ (cmd, "aug_insert") || STRCASEEQ (cmd, "aug-insert"))
+     pod2text ("aug-insert", _("insert a sibling Augeas node"), "=head1 SYNOPSIS\n\n aug-insert augpath label before\n\n=head1 DESCRIPTION\n\nCreate a new sibling C<label> for C<path>, inserting it into\nthe tree before or after C<path> (depending on the boolean\nflag C<before>).\n\nC<path> must match exactly one existing node in the tree, and\nC<label> must be a label, ie. not contain C</>, C<*> or end\nwith a bracketed index C<[N]>.");
+@@ -1106,6 +1107,9 @@
+   if (STRCASEEQ (cmd, "part_set_mbr_id") || STRCASEEQ (cmd, "part-set-mbr-id"))
+     pod2text ("part-set-mbr-id", _("set the MBR type byte (ID byte) of a partition"), "=head1 SYNOPSIS\n\n part-set-mbr-id device partnum idbyte\n\n=head1 DESCRIPTION\n\nSets the MBR type byte (also known as the ID byte) of\nthe numbered partition C<partnum> to C<idbyte>.  Note\nthat the type bytes quoted in most documentation are\nin fact hexadecimal numbers, but usually documented\nwithout any leading \"0x\" which might be confusing.\n\nNote that only MBR (old DOS-style) partitions have type bytes.\nYou will get undefined results for other partition table\ntypes (see C<part_get_parttype>).");
+   else
++  if (STRCASEEQ (cmd, "aug_clear") || STRCASEEQ (cmd, "aug-clear"))
++    pod2text ("aug-clear", _("clear Augeas path"), "=head1 SYNOPSIS\n\n aug-clear augpath\n\n=head1 DESCRIPTION\n\nSet the value associated with C<path> to C<NULL>.  This\nis the same as the L<augtool(1)> C<clear> command.");
++  else
+     display_builtin_command (cmd);
+ }
+ 
+@@ -7040,6 +7044,20 @@
+   return r;
+ }
+ 
++static int run_aug_clear (const char *cmd, int argc, char *argv[])
++{
++  int r;
++  const char *augpath;
++  if (argc != 1) {
++    fprintf (stderr, _("%s should have %d parameter(s)\n"), cmd, 1);
++    fprintf (stderr, _("type 'help %s' for help on %s\n"), cmd, cmd);
++    return -1;
++  }
++  augpath = argv[0];
++  r = guestfs_aug_clear (g, augpath);
++  return r;
++}
++
+ int run_action (const char *cmd, int argc, char *argv[])
+ {
+   if (STRCASEEQ (cmd, "launch") || STRCASEEQ (cmd, "run"))
+@@ -7840,6 +7858,9 @@
+   if (STRCASEEQ (cmd, "part_set_mbr_id") || STRCASEEQ (cmd, "part-set-mbr-id"))
+     return run_part_set_mbr_id (cmd, argc, argv);
+   else
++  if (STRCASEEQ (cmd, "aug_clear") || STRCASEEQ (cmd, "aug-clear"))
++    return run_aug_clear (cmd, argc, argv);
++  else
+     {
+       fprintf (stderr, _("%s: unknown command\n"), cmd);
+       if (command_num == 1)
+diff -ur libguestfs-1.2.5.orig/fish/completion.c libguestfs-1.2.5/fish/completion.c
+--- libguestfs-1.2.5.orig/fish/completion.c	2010-04-12 19:13:30.000000000 +0100
++++ libguestfs-1.2.5/fish/completion.c	2010-04-30 20:42:12.045459015 +0100
+@@ -319,6 +319,7 @@
+   "part-get-bootable",
+   "part-get-mbr-id",
+   "part-set-mbr-id",
++  "aug-clear",
+   NULL
+ };
+ 
+diff -ur libguestfs-1.2.5.orig/fish/guestfish-actions.pod libguestfs-1.2.5/fish/guestfish-actions.pod
+--- libguestfs-1.2.5.orig/fish/guestfish-actions.pod	2010-04-30 17:41:48.000000000 +0100
++++ libguestfs-1.2.5/fish/guestfish-actions.pod	2010-04-30 20:42:12.046350639 +0100
+@@ -98,6 +98,13 @@
+ This is the same as C<add-drive> but it allows you
+ to specify the QEMU interface emulation to use at run time.
+ 
++=head2 aug-clear
++
++ aug-clear augpath
++
++Set the value associated with C<path> to C<NULL>.  This
++is the same as the L<augtool(1)> C<clear> command.
++
+ =head2 aug-close
+ 
+  aug-close
+@@ -255,7 +262,12 @@
+ 
+  aug-set augpath val
+ 
+-Set the value associated with C<path> to C<value>.
++Set the value associated with C<path> to C<val>.
++
++In the Augeas API, it is possible to clear a node by setting
++the value to NULL.  Due to an oversight in the libguestfs API
++you cannot do that with this call.  Instead you must use the
++C<aug-clear> call.
+ 
+ =head2 available
+ 
+diff -ur libguestfs-1.2.5.orig/haskell/Guestfs.hs libguestfs-1.2.5/haskell/Guestfs.hs
+--- libguestfs-1.2.5.orig/haskell/Guestfs.hs	2010-04-12 19:13:31.000000000 +0100
++++ libguestfs-1.2.5/haskell/Guestfs.hs	2010-04-30 20:42:12.047350514 +0100
+@@ -191,7 +191,8 @@
+   copy_size,
+   part_del,
+   part_get_mbr_id,
+-  part_set_mbr_id
++  part_set_mbr_id,
++  aug_clear
+   ) where
+ 
+ -- Unfortunately some symbols duplicate ones already present
+@@ -2252,3 +2253,15 @@
+       fail err
+     else return ()
+ 
++foreign import ccall unsafe "guestfs_aug_clear" c_aug_clear
++  :: GuestfsP -> CString -> IO (CInt)
++
++aug_clear :: GuestfsH -> String -> IO ()
++aug_clear h augpath = do
++  r <- withCString augpath $ \augpath -> withForeignPtr h (\p -> c_aug_clear p augpath)
++  if (r == -1)
++    then do
++      err <- last_error h
++      fail err
++    else return ()
++
+diff -ur libguestfs-1.2.5.orig/java/com/redhat/et/libguestfs/GuestFS.java libguestfs-1.2.5/java/com/redhat/et/libguestfs/GuestFS.java
+--- libguestfs-1.2.5.orig/java/com/redhat/et/libguestfs/GuestFS.java	2010-04-30 17:41:49.000000000 +0100
++++ libguestfs-1.2.5/java/com/redhat/et/libguestfs/GuestFS.java	2010-04-30 20:42:12.049350148 +0100
+@@ -1652,7 +1652,12 @@
+   /**
+    * set Augeas path to value
+    * <p>
+-   * Set the value associated with "path" to "value".
++   * Set the value associated with "path" to "val".
++   * <p>
++   * In the Augeas API, it is possible to clear a node by
++   * setting the value to NULL. Due to an oversight in the
++   * libguestfs API you cannot do that with this call.
++   * Instead you must use the "g.aug_clear" call.
+    * <p>
+    * @throws LibGuestFSException
+    */
+@@ -6584,4 +6589,22 @@
+   private native void _part_set_mbr_id (long g, String device, int partnum, int idbyte)
+     throws LibGuestFSException;
+ 
++  /**
++   * clear Augeas path
++   * <p>
++   * Set the value associated with "path" to "NULL". This is
++   * the same as the augtool(1) "clear" command.
++   * <p>
++   * @throws LibGuestFSException
++   */
++  public void aug_clear (String augpath)
++    throws LibGuestFSException
++  {
++    if (g == 0)
++      throw new LibGuestFSException ("aug_clear: handle is closed");
++    _aug_clear (g, augpath);
++  }
++  private native void _aug_clear (long g, String augpath)
++    throws LibGuestFSException;
++
+ }
+diff -ur libguestfs-1.2.5.orig/java/com_redhat_et_libguestfs_GuestFS.c libguestfs-1.2.5/java/com_redhat_et_libguestfs_GuestFS.c
+--- libguestfs-1.2.5.orig/java/com_redhat_et_libguestfs_GuestFS.c	2010-04-12 19:13:31.000000000 +0100
++++ libguestfs-1.2.5/java/com_redhat_et_libguestfs_GuestFS.c	2010-04-30 20:42:12.051345817 +0100
+@@ -6782,3 +6782,20 @@
+   }
+ }
+ 
++JNIEXPORT void JNICALL
++Java_com_redhat_et_libguestfs_GuestFS__1aug_1clear
++  (JNIEnv *env, jobject obj, jlong jg, jstring jaugpath)
++{
++  guestfs_h *g = (guestfs_h *) (long) jg;
++  int r;
++  const char *augpath;
++
++  augpath = (*env)->GetStringUTFChars (env, jaugpath, NULL);
++  r = guestfs_aug_clear (g, augpath);
++  (*env)->ReleaseStringUTFChars (env, jaugpath, augpath);
++  if (r == -1) {
++    throw_exception (env, guestfs_last_error (g));
++    return ;
++  }
++}
++
+diff -ur libguestfs-1.2.5.orig/ocaml/guestfs_c_actions.c libguestfs-1.2.5/ocaml/guestfs_c_actions.c
+--- libguestfs-1.2.5.orig/ocaml/guestfs_c_actions.c	2010-04-12 19:13:30.000000000 +0100
++++ libguestfs-1.2.5/ocaml/guestfs_c_actions.c	2010-04-30 20:42:12.053343757 +0100
+@@ -676,6 +676,36 @@
+ }
+ 
+ /* Automatically generated wrapper for function
++ * val aug_clear : t -> string -> unit
++ */
++
++/* Emit prototype to appease gcc's -Wmissing-prototypes. */
++CAMLprim value ocaml_guestfs_aug_clear (value gv, value augpathv);
++
++CAMLprim value
++ocaml_guestfs_aug_clear (value gv, value augpathv)
++{
++  CAMLparam2 (gv, augpathv);
++  CAMLlocal1 (rv);
++
++  guestfs_h *g = Guestfs_val (gv);
++  if (g == NULL)
++    ocaml_guestfs_raise_closed ("aug_clear");
++
++  const char *augpath = String_val (augpathv);
++  int r;
++
++  caml_enter_blocking_section ();
++  r = guestfs_aug_clear (g, augpath);
++  caml_leave_blocking_section ();
++  if (r == -1)
++    ocaml_guestfs_raise_error (g, "aug_clear");
++
++  rv = Val_unit;
++  CAMLreturn (rv);
++}
++
++/* Automatically generated wrapper for function
+  * val aug_close : t -> unit
+  */
+ 
+diff -ur libguestfs-1.2.5.orig/ocaml/guestfs.ml libguestfs-1.2.5/ocaml/guestfs.ml
+--- libguestfs-1.2.5.orig/ocaml/guestfs.ml	2010-04-12 19:13:30.000000000 +0100
++++ libguestfs-1.2.5/ocaml/guestfs.ml	2010-04-30 20:42:12.054344442 +0100
+@@ -163,6 +163,7 @@
+ external add_drive_ro : t -> string -> unit = "ocaml_guestfs_add_drive_ro"
+ external add_drive_ro_with_if : t -> string -> string -> unit = "ocaml_guestfs_add_drive_ro_with_if"
+ external add_drive_with_if : t -> string -> string -> unit = "ocaml_guestfs_add_drive_with_if"
++external aug_clear : t -> string -> unit = "ocaml_guestfs_aug_clear"
+ external aug_close : t -> unit = "ocaml_guestfs_aug_close"
+ external aug_defnode : t -> string -> string -> string -> int_bool = "ocaml_guestfs_aug_defnode"
+ external aug_defvar : t -> string -> string option -> int = "ocaml_guestfs_aug_defvar"
+diff -ur libguestfs-1.2.5.orig/ocaml/guestfs.mli libguestfs-1.2.5/ocaml/guestfs.mli
+--- libguestfs-1.2.5.orig/ocaml/guestfs.mli	2010-04-20 08:48:33.000000000 +0100
++++ libguestfs-1.2.5/ocaml/guestfs.mli	2010-04-30 20:42:12.054344442 +0100
+@@ -186,6 +186,9 @@
+ val add_drive_with_if : t -> string -> string -> unit
+ (** add a drive specifying the QEMU block emulation to use *)
+ 
++val aug_clear : t -> string -> unit
++(** clear Augeas path *)
++
+ val aug_close : t -> unit
+ (** close the current Augeas handle *)
+ 
+diff -ur libguestfs-1.2.5.orig/perl/Guestfs.xs libguestfs-1.2.5/perl/Guestfs.xs
+--- libguestfs-1.2.5.orig/perl/Guestfs.xs	2010-04-12 19:13:30.000000000 +0100
++++ libguestfs-1.2.5/perl/Guestfs.xs	2010-04-30 20:42:12.055346942 +0100
+@@ -4382,3 +4382,14 @@
+       if (r == -1)
+         croak ("%s", guestfs_last_error (g));
+ 
++void
++aug_clear (g, augpath)
++      guestfs_h *g;
++      char *augpath;
++PREINIT:
++      int r;
++ PPCODE:
++      r = guestfs_aug_clear (g, augpath);
++      if (r == -1)
++        croak ("%s", guestfs_last_error (g));
++
+diff -ur libguestfs-1.2.5.orig/perl/lib/Sys/Guestfs.pm libguestfs-1.2.5/perl/lib/Sys/Guestfs.pm
+--- libguestfs-1.2.5.orig/perl/lib/Sys/Guestfs.pm	2010-04-30 17:41:48.000000000 +0100
++++ libguestfs-1.2.5/perl/lib/Sys/Guestfs.pm	2010-04-30 20:42:12.057349846 +0100
+@@ -186,6 +186,11 @@
+ This is the same as C<$h-E<gt>add_drive> but it allows you
+ to specify the QEMU interface emulation to use at run time.
+ 
++=item $h->aug_clear ($augpath);
++
++Set the value associated with C<path> to C<NULL>.  This
++is the same as the L<augtool(1)> C<clear> command.
++
+ =item $h->aug_close ();
+ 
+ Close the current Augeas handle and free up any resources
+@@ -317,7 +322,12 @@
+ 
+ =item $h->aug_set ($augpath, $val);
+ 
+-Set the value associated with C<path> to C<value>.
++Set the value associated with C<path> to C<val>.
++
++In the Augeas API, it is possible to clear a node by setting
++the value to NULL.  Due to an oversight in the libguestfs API
++you cannot do that with this call.  Instead you must use the
++C<$h-E<gt>aug_clear> call.
+ 
+ =item $h->available (\@groups);
+ 
+diff -ur libguestfs-1.2.5.orig/python/guestfs.py libguestfs-1.2.5/python/guestfs.py
+--- libguestfs-1.2.5.orig/python/guestfs.py	2010-04-30 17:41:49.000000000 +0100
++++ libguestfs-1.2.5/python/guestfs.py	2010-04-30 20:42:12.058348336 +0100
+@@ -855,7 +855,12 @@
+         return libguestfsmod.aug_get (self._o, augpath)
+ 
+     def aug_set (self, augpath, val):
+-        u"""Set the value associated with "path" to "value".
++        u"""Set the value associated with "path" to "val".
++        
++        In the Augeas API, it is possible to clear a node by
++        setting the value to NULL. Due to an oversight in the
++        libguestfs API you cannot do that with this call.
++        Instead you must use the "g.aug_clear" call.
+         """
+         return libguestfsmod.aug_set (self._o, augpath, val)
+ 
+@@ -3351,3 +3356,9 @@
+         """
+         return libguestfsmod.part_set_mbr_id (self._o, device, partnum, idbyte)
+ 
++    def aug_clear (self, augpath):
++        u"""Set the value associated with "path" to "NULL". This is
++        the same as the augtool(1) "clear" command.
++        """
++        return libguestfsmod.aug_clear (self._o, augpath)
++
+diff -ur libguestfs-1.2.5.orig/python/guestfs-py.c libguestfs-1.2.5/python/guestfs-py.c
+--- libguestfs-1.2.5.orig/python/guestfs-py.c	2010-04-12 19:13:30.000000000 +0100
++++ libguestfs-1.2.5/python/guestfs-py.c	2010-04-30 20:42:12.060347828 +0100
+@@ -7870,6 +7870,31 @@
+   return py_r;
+ }
+ 
++static PyObject *
++py_guestfs_aug_clear (PyObject *self, PyObject *args)
++{
++  PyObject *py_g;
++  guestfs_h *g;
++  PyObject *py_r;
++  int r;
++  const char *augpath;
++
++  if (!PyArg_ParseTuple (args, (char *) "Os:guestfs_aug_clear",
++                         &py_g, &augpath))
++    return NULL;
++  g = get_handle (py_g);
++
++  r = guestfs_aug_clear (g, augpath);
++  if (r == -1) {
++    PyErr_SetString (PyExc_RuntimeError, guestfs_last_error (g));
++    return NULL;
++  }
++
++  Py_INCREF (Py_None);
++  py_r = Py_None;
++  return py_r;
++}
++
+ static PyMethodDef methods[] = {
+   { (char *) "create", py_guestfs_create, METH_VARARGS, NULL },
+   { (char *) "close", py_guestfs_close, METH_VARARGS, NULL },
+@@ -8161,6 +8186,7 @@
+   { (char *) "part_get_bootable", py_guestfs_part_get_bootable, METH_VARARGS, NULL },
+   { (char *) "part_get_mbr_id", py_guestfs_part_get_mbr_id, METH_VARARGS, NULL },
+   { (char *) "part_set_mbr_id", py_guestfs_part_set_mbr_id, METH_VARARGS, NULL },
++  { (char *) "aug_clear", py_guestfs_aug_clear, METH_VARARGS, NULL },
+   { NULL, NULL, 0, NULL }
+ };
+ 
+diff -ur libguestfs-1.2.5.orig/ruby/ext/guestfs/_guestfs.c libguestfs-1.2.5/ruby/ext/guestfs/_guestfs.c
+--- libguestfs-1.2.5.orig/ruby/ext/guestfs/_guestfs.c	2010-04-12 19:13:31.000000000 +0100
++++ libguestfs-1.2.5/ruby/ext/guestfs/_guestfs.c	2010-04-30 20:42:12.063344243 +0100
+@@ -7401,6 +7401,28 @@
+   return Qnil;
+ }
+ 
++static VALUE ruby_guestfs_aug_clear (VALUE gv, VALUE augpathv)
++{
++  guestfs_h *g;
++  Data_Get_Struct (gv, guestfs_h, g);
++  if (!g)
++    rb_raise (rb_eArgError, "%s: used handle after closing it", "aug_clear");
++
++  Check_Type (augpathv, T_STRING);
++  const char *augpath = StringValueCStr (augpathv);
++  if (!augpath)
++    rb_raise (rb_eTypeError, "expected string for parameter %s of %s",
++              "augpath", "aug_clear");
++
++  int r;
++
++  r = guestfs_aug_clear (g, augpath);
++  if (r == -1)
++    rb_raise (e_Error, "%s", guestfs_last_error (g));
++
++  return Qnil;
++}
++
+ /* Initialize the module. */
+ void Init__guestfs ()
+ {
+@@ -7987,4 +8009,6 @@
+         ruby_guestfs_part_get_mbr_id, 2);
+   rb_define_method (c_guestfs, "part_set_mbr_id",
+         ruby_guestfs_part_set_mbr_id, 3);
++  rb_define_method (c_guestfs, "aug_clear",
++        ruby_guestfs_aug_clear, 1);
+ }
+diff -ur libguestfs-1.2.5.orig/src/generator.ml libguestfs-1.2.5/src/generator.ml
+--- libguestfs-1.2.5.orig/src/generator.ml	2010-04-30 17:38:45.000000000 +0100
++++ libguestfs-1.2.5/src/generator.ml	2010-04-30 20:42:12.067342848 +0100
+@@ -1245,7 +1245,12 @@
+    [], (* XXX Augeas code needs tests. *)
+    "set Augeas path to value",
+    "\
+-Set the value associated with C<path> to C<value>.");
++Set the value associated with C<path> to C<val>.
++
++In the Augeas API, it is possible to clear a node by setting
++the value to NULL.  Due to an oversight in the libguestfs API
++you cannot do that with this call.  Instead you must use the
++C<guestfs_aug_clear> call.");
+ 
+   ("aug_insert", (RErr, [String "augpath"; String "label"; Bool "before"]), 21, [Optional "augeas"],
+    [], (* XXX Augeas code needs tests. *)
+@@ -4441,6 +4446,13 @@
+ You will get undefined results for other partition table
+ types (see C<guestfs_part_get_parttype>).");
+ 
++  ("aug_clear", (RErr, [String "augpath"]), 239, [Optional "augeas"],
++   [], (* XXX Augeas code needs tests. *)
++   "clear Augeas path",
++   "\
++Set the value associated with C<path> to C<NULL>.  This
++is the same as the L<augtool(1)> C<clear> command.");
++
+ ]
+ 
+ let all_functions = non_daemon_functions @ daemon_functions
+diff -ur libguestfs-1.2.5.orig/src/guestfs-actions.c libguestfs-1.2.5/src/guestfs-actions.c
+--- libguestfs-1.2.5.orig/src/guestfs-actions.c	2010-04-12 19:13:29.000000000 +0100
++++ libguestfs-1.2.5/src/guestfs-actions.c	2010-04-30 20:42:12.069343710 +0100
+@@ -13694,6 +13694,58 @@
+   return 0;
+ }
+ 
++int guestfs_aug_clear (guestfs_h *g,
++		const char *augpath)
++{
++  struct guestfs_aug_clear_args args;
++  guestfs_message_header hdr;
++  guestfs_message_error err;
++  int serial;
++  int r;
++
++  if (guestfs__get_trace (g)) {
++    printf ("aug_clear");
++    printf (" \"%s\"", augpath);
++    putchar ('\n');
++  }
++
++  if (check_state (g, "guestfs_aug_clear") == -1) return -1;
++  guestfs___set_busy (g);
++
++  args.augpath = (char *) augpath;
++  serial = guestfs___send (g, GUESTFS_PROC_AUG_CLEAR,
++        (xdrproc_t) xdr_guestfs_aug_clear_args, (char *) &args);
++  if (serial == -1) {
++    guestfs___end_busy (g);
++    return -1;
++  }
++
++  memset (&hdr, 0, sizeof hdr);
++  memset (&err, 0, sizeof err);
++
++  r = guestfs___recv (g, "aug_clear", &hdr, &err,
++        NULL, NULL);
++  if (r == -1) {
++    guestfs___end_busy (g);
++    return -1;
++  }
++
++  if (check_reply_header (g, &hdr, GUESTFS_PROC_AUG_CLEAR, serial) == -1) {
++    guestfs___end_busy (g);
++    return -1;
++  }
++
++  if (hdr.status == GUESTFS_STATUS_ERROR) {
++    error (g, "%s: %s", "aug_clear", err.error_message);
++    free (err.error_message);
++    guestfs___end_busy (g);
++    return -1;
++  }
++
++  guestfs___end_busy (g);
++  return 0;
++}
++
+ /* Structure-freeing functions.  These rely on the fact that the
+  * structure format is identical to the XDR format.  See note in
+  * generator.ml.
+diff -ur libguestfs-1.2.5.orig/src/guestfs-actions.h libguestfs-1.2.5/src/guestfs-actions.h
+--- libguestfs-1.2.5.orig/src/guestfs-actions.h	2010-04-20 08:48:32.000000000 +0100
++++ libguestfs-1.2.5/src/guestfs-actions.h	2010-04-30 20:42:12.070345717 +0100
+@@ -308,3 +308,4 @@
+ extern int guestfs_part_get_bootable (guestfs_h *g, const char *device, int partnum);
+ extern int guestfs_part_get_mbr_id (guestfs_h *g, const char *device, int partnum);
+ extern int guestfs_part_set_mbr_id (guestfs_h *g, const char *device, int partnum, int idbyte);
++extern int guestfs_aug_clear (guestfs_h *g, const char *augpath);
+diff -ur libguestfs-1.2.5.orig/src/guestfs-actions.pod libguestfs-1.2.5/src/guestfs-actions.pod
+--- libguestfs-1.2.5.orig/src/guestfs-actions.pod	2010-04-30 17:41:48.000000000 +0100
++++ libguestfs-1.2.5/src/guestfs-actions.pod	2010-04-30 20:42:12.071346605 +0100
+@@ -115,6 +115,16 @@
+ 
+ This function returns 0 on success or -1 on error.
+ 
++=head2 guestfs_aug_clear
++
++ int guestfs_aug_clear (guestfs_h *g,
++		const char *augpath);
++
++Set the value associated with C<path> to C<NULL>.  This
++is the same as the L<augtool(1)> C<clear> command.
++
++This function returns 0 on success or -1 on error.
++
+ =head2 guestfs_aug_close
+ 
+  int guestfs_aug_close (guestfs_h *g);
+@@ -321,7 +331,12 @@
+ 		const char *augpath,
+ 		const char *val);
+ 
+-Set the value associated with C<path> to C<value>.
++Set the value associated with C<path> to C<val>.
++
++In the Augeas API, it is possible to clear a node by setting
++the value to NULL.  Due to an oversight in the libguestfs API
++you cannot do that with this call.  Instead you must use the
++C<guestfs_aug_clear> call.
+ 
+ This function returns 0 on success or -1 on error.
+ 
+diff -ur libguestfs-1.2.5.orig/src/guestfs-availability.pod libguestfs-1.2.5/src/guestfs-availability.pod
+--- libguestfs-1.2.5.orig/src/guestfs-availability.pod	2010-03-16 19:47:56.000000000 +0000
++++ libguestfs-1.2.5/src/guestfs-availability.pod	2010-04-30 20:42:12.072347258 +0100
+@@ -3,6 +3,7 @@
+ =item B<augeas>
+ 
+ The following functions:
++L</guestfs_aug_clear>
+ L</guestfs_aug_close>
+ L</guestfs_aug_defnode>
+ L</guestfs_aug_defvar>
+diff -ur libguestfs-1.2.5.orig/src/guestfs_protocol.x libguestfs-1.2.5/src/guestfs_protocol.x
+--- libguestfs-1.2.5.orig/src/guestfs_protocol.x	2010-04-12 19:13:29.000000000 +0100
++++ libguestfs-1.2.5/src/guestfs_protocol.x	2010-04-30 20:42:12.073346927 +0100
+@@ -1567,6 +1567,10 @@
+   int idbyte;
+ };
+ 
++struct guestfs_aug_clear_args {
++  string augpath<>;
++};
++
+ enum guestfs_procedure {
+   GUESTFS_PROC_MOUNT = 1,
+   GUESTFS_PROC_SYNC = 2,
+@@ -1799,6 +1803,7 @@
+   GUESTFS_PROC_PART_GET_BOOTABLE = 234,
+   GUESTFS_PROC_PART_GET_MBR_ID = 235,
+   GUESTFS_PROC_PART_SET_MBR_ID = 236,
++  GUESTFS_PROC_AUG_CLEAR = 239,
+   GUESTFS_PROC_NR_PROCS
+ };
+ 
+diff -ur libguestfs-1.2.5.orig/src/libguestfs.syms libguestfs-1.2.5/src/libguestfs.syms
+--- libguestfs-1.2.5.orig/src/libguestfs.syms	2010-04-12 19:13:30.000000000 +0100
++++ libguestfs-1.2.5/src/libguestfs.syms	2010-04-30 20:42:12.073346927 +0100
+@@ -26,6 +26,7 @@
+         guestfs_add_drive_ro;
+         guestfs_add_drive_ro_with_if;
+         guestfs_add_drive_with_if;
++        guestfs_aug_clear;
+         guestfs_aug_close;
+         guestfs_aug_defnode;
+         guestfs_aug_defvar;
+diff -ur libguestfs-1.2.5.orig/src/MAX_PROC_NR libguestfs-1.2.5/src/MAX_PROC_NR
+--- libguestfs-1.2.5.orig/src/MAX_PROC_NR	2010-04-12 19:06:21.000000000 +0100
++++ libguestfs-1.2.5/src/MAX_PROC_NR	2010-04-30 20:42:12.073346927 +0100
+@@ -1 +1 @@
+-236
++239

@@ -1,0 +1,14 @@
+Fix add-cdrom command and CDROM devices in the appliance for RHEL 6.
+
+https://bugzilla.redhat.com/show_bug.cgi?id=598807
+
+--- libguestfs-1.2.7.orig/appliance/kmod.whitelist.in	2010-04-22 21:54:22.000000000 +0100
++++ libguestfs-1.2.7/appliance/kmod.whitelist.in	2010-06-03 10:39:25.493320822 +0100
+@@ -23,6 +23,7 @@
+ sd_mod.ko
+ sym53c8xx.ko
+ ata_piix.ko
++sr_mod.ko
+ 
+ ext2.ko
+ ext3.ko

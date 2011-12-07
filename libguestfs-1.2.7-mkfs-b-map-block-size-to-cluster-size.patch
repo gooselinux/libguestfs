@@ -1,0 +1,317 @@
+diff -urN libguestfs-1.2.7.orig/capitests/tests.c libguestfs-1.2.7/capitests/tests.c
+--- libguestfs-1.2.7.orig/capitests/tests.c	2010-07-07 20:58:18.152550614 +0100
++++ libguestfs-1.2.7/capitests/tests.c	2010-07-07 20:58:51.503925098 +0100
+@@ -3775,6 +3775,138 @@
+   return 0;
+ }
+ 
++static int test_mkfs_b_1_skip (void)
++{
++  const char *str;
++
++  str = getenv ("TEST_ONLY");
++  if (str)
++    return strstr (str, "mkfs_b") == NULL;
++  str = getenv ("SKIP_TEST_MKFS_B_1");
++  if (str && STREQ (str, "1")) return 1;
++  str = getenv ("SKIP_TEST_MKFS_B");
++  if (str && STREQ (str, "1")) return 1;
++  return 0;
++}
++
++static int test_mkfs_b_1 (void)
++{
++  if (test_mkfs_b_1_skip ()) {
++    printf ("        %s skipped (reason: environment variable set)\n", "test_mkfs_b_1");
++    return 0;
++  }
++
++  /* InitNone|InitEmpty for test_mkfs_b_1 */
++  {
++    const char *device = "/dev/sda";
++    int r;
++    suppress_error = 0;
++    r = guestfs_blockdev_setrw (g, device);
++    if (r == -1)
++      return -1;
++  }
++  {
++    int r;
++    suppress_error = 0;
++    r = guestfs_umount_all (g);
++    if (r == -1)
++      return -1;
++  }
++  {
++    int r;
++    suppress_error = 0;
++    r = guestfs_lvm_remove_all (g);
++    if (r == -1)
++      return -1;
++  }
++  /* TestRun for mkfs_b (1) */
++  {
++    const char *device = "/dev/sda";
++    const char *parttype = "mbr";
++    int r;
++    suppress_error = 0;
++    r = guestfs_part_disk (g, device, parttype);
++    if (r == -1)
++      return -1;
++  }
++  {
++    const char *fstype = "vfat";
++    const char *device = "/dev/sda1";
++    int r;
++    suppress_error = 0;
++    r = guestfs_mkfs_b (g, fstype, 32768, device);
++    if (r == -1)
++      return -1;
++  }
++  return 0;
++}
++
++static int test_mkfs_b_2_skip (void)
++{
++  const char *str;
++
++  str = getenv ("TEST_ONLY");
++  if (str)
++    return strstr (str, "mkfs_b") == NULL;
++  str = getenv ("SKIP_TEST_MKFS_B_2");
++  if (str && STREQ (str, "1")) return 1;
++  str = getenv ("SKIP_TEST_MKFS_B");
++  if (str && STREQ (str, "1")) return 1;
++  return 0;
++}
++
++static int test_mkfs_b_2 (void)
++{
++  if (test_mkfs_b_2_skip ()) {
++    printf ("        %s skipped (reason: environment variable set)\n", "test_mkfs_b_2");
++    return 0;
++  }
++
++  /* InitNone|InitEmpty for test_mkfs_b_2 */
++  {
++    const char *device = "/dev/sda";
++    int r;
++    suppress_error = 0;
++    r = guestfs_blockdev_setrw (g, device);
++    if (r == -1)
++      return -1;
++  }
++  {
++    int r;
++    suppress_error = 0;
++    r = guestfs_umount_all (g);
++    if (r == -1)
++      return -1;
++  }
++  {
++    int r;
++    suppress_error = 0;
++    r = guestfs_lvm_remove_all (g);
++    if (r == -1)
++      return -1;
++  }
++  /* TestLastFail for mkfs_b (2) */
++  {
++    const char *device = "/dev/sda";
++    const char *parttype = "mbr";
++    int r;
++    suppress_error = 0;
++    r = guestfs_part_disk (g, device, parttype);
++    if (r == -1)
++      return -1;
++  }
++  {
++    const char *fstype = "vfat";
++    const char *device = "/dev/sda1";
++    int r;
++    suppress_error = 1;
++    r = guestfs_mkfs_b (g, fstype, 33280, device);
++    if (r != -1)
++      return -1;
++  }
++  return 0;
++}
++
+ static int test_inotify_add_watch_0_skip (void)
+ {
+   const char *str;
+@@ -25773,7 +25905,7 @@
+   /* Cancel previous alarm. */
+   alarm (0);
+ 
+-  nr_tests = 260;
++  nr_tests = 262;
+ 
+   test_num++;
+   if (guestfs_get_verbose (g))
+@@ -26098,6 +26230,22 @@
+   test_num++;
+   if (guestfs_get_verbose (g))
+     printf ("-------------------------------------------------------------------------------\n");
++  printf ("%3d/%3d test_mkfs_b_1\n", test_num, nr_tests);
++  if (test_mkfs_b_1 () == -1) {
++    printf ("test_mkfs_b_1 FAILED\n");
++    n_failed++;
++  }
++  test_num++;
++  if (guestfs_get_verbose (g))
++    printf ("-------------------------------------------------------------------------------\n");
++  printf ("%3d/%3d test_mkfs_b_2\n", test_num, nr_tests);
++  if (test_mkfs_b_2 () == -1) {
++    printf ("test_mkfs_b_2 FAILED\n");
++    n_failed++;
++  }
++  test_num++;
++  if (guestfs_get_verbose (g))
++    printf ("-------------------------------------------------------------------------------\n");
+   printf ("%3d/%3d test_inotify_add_watch_0\n", test_num, nr_tests);
+   if (test_inotify_add_watch_0 () == -1) {
+     printf ("test_inotify_add_watch_0 FAILED\n");
+diff -urN libguestfs-1.2.7.orig/daemon/mkfs.c libguestfs-1.2.7/daemon/mkfs.c
+--- libguestfs-1.2.7.orig/daemon/mkfs.c	2010-03-26 09:58:22.000000000 +0000
++++ libguestfs-1.2.7/daemon/mkfs.c	2010-07-07 20:58:43.549676330 +0100
+@@ -102,12 +102,41 @@
+ do_mkfs_b (const char *fstype, int blocksize, const char *device)
+ {
+   const char *extra[2];
+-  char blocksize_s[32];
++  char n[32];
+ 
+-  snprintf (blocksize_s, sizeof blocksize_s, "%d", blocksize);
++  if (STREQ (fstype, "vfat") ||
++      STREQ (fstype, "msdos")) {
++    /* For VFAT map the blocksize into a cluster size.  However we
++     * have to determine the block device sector size in order to do
++     * this.
++     */
++    int sectorsize = do_blockdev_getss (device);
++    if (sectorsize == -1)
++      return -1;
+ 
+-  extra[0] = "-b";
+-  extra[1] = blocksize_s;
++    int sectors_per_cluster = blocksize / sectorsize;
++    if (sectors_per_cluster < 1 || sectors_per_cluster > 128) {
++      reply_with_error ("unsupported cluster size for %s filesystem (requested cluster size = %d, sector size = %d, trying sectors per cluster = %d)",
++                        fstype, blocksize, sectorsize, sectors_per_cluster);
++      return -1;
++    }
++
++    snprintf (n, sizeof n, "%d", sectors_per_cluster);
++    extra[0] = "-s";
++    extra[1] = n;
++  }
++  else if (STREQ (fstype, "ntfs")) {
++    /* For NTFS map the blocksize into a cluster size. */
++    snprintf (n, sizeof n, "%d", blocksize);
++    extra[0] = "-c";
++    extra[1] = n;
++  }
++  else {
++    /* For all other filesystem types, try the -b option. */
++    snprintf (n, sizeof n, "%d", blocksize);
++    extra[0] = "-b";
++    extra[1] = n;
++  }
+ 
+   return mkfs (fstype, device, extra, 2);
+ }
+diff -urN libguestfs-1.2.7.orig/fish/guestfish-actions.pod libguestfs-1.2.7/fish/guestfish-actions.pod
+--- libguestfs-1.2.7.orig/fish/guestfish-actions.pod	2010-07-07 20:58:18.165553250 +0100
++++ libguestfs-1.2.7/fish/guestfish-actions.pod	2010-07-07 20:58:43.551676007 +0100
+@@ -1722,6 +1722,9 @@
+ block sizes depend on the filesystem type, but typically they
+ are C<1024>, C<2048> or C<4096> only.
+ 
++For VFAT and NTFS the C<blocksize> parameter is treated as
++the requested cluster size.
++
+ =head2 mkmountpoint
+ 
+  mkmountpoint exemptpath
+diff -urN libguestfs-1.2.7.orig/java/com/redhat/et/libguestfs/GuestFS.java libguestfs-1.2.7/java/com/redhat/et/libguestfs/GuestFS.java
+--- libguestfs-1.2.7.orig/java/com/redhat/et/libguestfs/GuestFS.java	2010-07-07 20:58:18.169552162 +0100
++++ libguestfs-1.2.7/java/com/redhat/et/libguestfs/GuestFS.java	2010-07-07 20:58:43.553675807 +0100
+@@ -5438,6 +5438,9 @@
+    * Supported block sizes depend on the filesystem type, but
+    * typically they are 1024, 2048 or 4096 only.
+    * <p>
++   * For VFAT and NTFS the "blocksize" parameter is treated
++   * as the requested cluster size.
++   * <p>
+    * @throws LibGuestFSException
+    */
+   public void mkfs_b (String fstype, int blocksize, String device)
+diff -urN libguestfs-1.2.7.orig/perl/lib/Sys/Guestfs.pm libguestfs-1.2.7/perl/lib/Sys/Guestfs.pm
+--- libguestfs-1.2.7.orig/perl/lib/Sys/Guestfs.pm	2010-07-07 20:58:18.180675379 +0100
++++ libguestfs-1.2.7/perl/lib/Sys/Guestfs.pm	2010-07-07 20:58:43.555675252 +0100
+@@ -1538,6 +1538,9 @@
+ block sizes depend on the filesystem type, but typically they
+ are C<1024>, C<2048> or C<4096> only.
+ 
++For VFAT and NTFS the C<blocksize> parameter is treated as
++the requested cluster size.
++
+ =item $h->mkmountpoint ($exemptpath);
+ 
+ C<$h-E<gt>mkmountpoint> and C<$h-E<gt>rmmountpoint> are
+diff -urN libguestfs-1.2.7.orig/python/guestfs.py libguestfs-1.2.7/python/guestfs.py
+--- libguestfs-1.2.7.orig/python/guestfs.py	2010-07-07 20:58:18.182572993 +0100
++++ libguestfs-1.2.7/python/guestfs.py	2010-07-07 20:58:43.556674965 +0100
+@@ -2727,6 +2727,9 @@
+         control the block size of the resulting filesystem.
+         Supported block sizes depend on the filesystem type, but
+         typically they are 1024, 2048 or 4096 only.
++        
++        For VFAT and NTFS the "blocksize" parameter is treated
++        as the requested cluster size.
+         """
+         return libguestfsmod.mkfs_b (self._o, fstype, blocksize, device)
+ 
+diff -urN libguestfs-1.2.7.orig/src/generator.ml libguestfs-1.2.7/src/generator.ml
+--- libguestfs-1.2.7.orig/src/generator.ml	2010-07-07 20:58:18.270550208 +0100
++++ libguestfs-1.2.7/src/generator.ml	2010-07-07 20:58:43.560675774 +0100
+@@ -3694,13 +3694,22 @@
+        ["mkfs_b"; "ext2"; "4096"; "/dev/sda1"];
+        ["mount_options"; ""; "/dev/sda1"; "/"];
+        ["write_file"; "/new"; "new file contents"; "0"];
+-       ["cat"; "/new"]], "new file contents")],
++       ["cat"; "/new"]], "new file contents");
++    InitEmpty, Always, TestRun (
++      [["part_disk"; "/dev/sda"; "mbr"];
++       ["mkfs_b"; "vfat"; "32768"; "/dev/sda1"]]);
++    InitEmpty, Always, TestLastFail (
++      [["part_disk"; "/dev/sda"; "mbr"];
++       ["mkfs_b"; "vfat"; "33280"; "/dev/sda1"]])],
+    "make a filesystem with block size",
+    "\
+ This call is similar to C<guestfs_mkfs>, but it allows you to
+ control the block size of the resulting filesystem.  Supported
+ block sizes depend on the filesystem type, but typically they
+-are C<1024>, C<2048> or C<4096> only.");
++are C<1024>, C<2048> or C<4096> only.
++
++For VFAT and NTFS the C<blocksize> parameter is treated as
++the requested cluster size.");
+ 
+   ("mke2journal", (RErr, [Int "blocksize"; Device "device"]), 188, [],
+    [InitEmpty, Always, TestOutput (
+diff -urN libguestfs-1.2.7.orig/src/guestfs-actions.pod libguestfs-1.2.7/src/guestfs-actions.pod
+--- libguestfs-1.2.7.orig/src/guestfs-actions.pod	2010-07-07 20:58:18.197675261 +0100
++++ libguestfs-1.2.7/src/guestfs-actions.pod	2010-07-07 20:58:43.563675002 +0100
+@@ -2259,6 +2259,9 @@
+ block sizes depend on the filesystem type, but typically they
+ are C<1024>, C<2048> or C<4096> only.
+ 
++For VFAT and NTFS the C<blocksize> parameter is treated as
++the requested cluster size.
++
+ This function returns 0 on success or -1 on error.
+ 
+ =head2 guestfs_mkmountpoint
+Binary files libguestfs-1.2.7.orig/src/.pod2text.data and libguestfs-1.2.7/src/.pod2text.data differ

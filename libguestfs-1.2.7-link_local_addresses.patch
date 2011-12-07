@@ -1,0 +1,39 @@
+Based on:
+commit 2481eb976219f8e44d82da1ab79c7c52627185bf
+Author: Richard Jones <rjones@redhat.com>
+Date:   Tue May 4 16:06:58 2010 +0100
+
+    Use link-local addresses between appliance and host (RHBZ#588763).
+
+diff --git a/appliance/init b/appliance/init
+index 15dab61..98538de 100755
+--- a/appliance/init
++++ b/appliance/init
+@@ -54,8 +54,8 @@ hwclock -u -s
+ 
+ # Set up the network.
+ ifconfig lo 127.0.0.1
+-ifconfig eth0 10.0.2.10
+-route add default gw 10.0.2.2
++ifconfig eth0 169.254.2.10
++route add default gw 169.254.2.2
+ 
+ # Scan for LVM.
+ modprobe dm_mod ||:
+diff --git a/src/guestfs.c b/src/guestfs.c
+index d23b9ae..027e08c 100644
+--- a/src/guestfs.c
++++ b/src/guestfs.c
+@@ -128,9 +128,9 @@ static int qemu_supports (guestfs_h *g, const char *option);
+  * typical Linux configurations of libguestfs, guestfwd is not
+  * actually used any more.
+  */
+-#define NETWORK "10.0.2.0/8"
+-#define ROUTER "10.0.2.2"
+-#define GUESTFWD_ADDR "10.0.2.4"
++#define NETWORK "169.254.0.0/16"
++#define ROUTER "169.254.2.2"
++#define GUESTFWD_ADDR "169.254.2.4"
+ #define GUESTFWD_PORT "6666"
+ 
+ /* GuestFS handle and connection. */

@@ -1,0 +1,31 @@
+diff -ur libguestfs-1.0.79.orig/fuse/Makefile.am libguestfs-1.0.79/fuse/Makefile.am
+--- libguestfs-1.0.79.orig/fuse/Makefile.am	2009-11-18 13:30:50.000000000 +0000
++++ libguestfs-1.0.79/fuse/Makefile.am	2009-11-18 17:26:41.842299061 +0000
+@@ -64,8 +64,8 @@
+ 
+ # Tests.
+ 
+-TESTS = test-fuse.sh
+-TESTS_ENVIRONMENT = \
+-	top_builddir=..
++#TESTS = test-fuse.sh
++#TESTS_ENVIRONMENT = \
++#	top_builddir=..
+ 
+ endif
+diff -ur libguestfs-1.0.79.orig/fuse/Makefile.in libguestfs-1.0.79/fuse/Makefile.in
+--- libguestfs-1.0.79.orig/fuse/Makefile.in	2009-11-18 13:30:57.000000000 +0000
++++ libguestfs-1.0.79/fuse/Makefile.in	2009-11-18 17:26:51.213184201 +0000
+@@ -770,9 +770,9 @@
+ 
+ 
+ # Tests.
+-@HAVE_FUSE_TRUE@TESTS = test-fuse.sh
+-@HAVE_FUSE_TRUE@TESTS_ENVIRONMENT = \
+-@HAVE_FUSE_TRUE@	top_builddir=..
++#@HAVE_FUSE_TRUE@TESTS = test-fuse.sh
++#@HAVE_FUSE_TRUE@TESTS_ENVIRONMENT = \
++#@HAVE_FUSE_TRUE@	top_builddir=..
+ 
+ all: all-am
+ 

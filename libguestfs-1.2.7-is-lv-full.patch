@@ -1,0 +1,916 @@
+diff -ur libguestfs-1.2.7.orig/capitests/tests.c libguestfs-1.2.7.islv/capitests/tests.c
+--- libguestfs-1.2.7.orig/capitests/tests.c	2010-07-30 17:18:21.479773002 +0100
++++ libguestfs-1.2.7.islv/capitests/tests.c	2010-07-30 17:11:53.244238751 +0100
+@@ -167,6 +167,264 @@
+   fprintf (stderr, "warning: \"guestfs_aug_clear\" has no tests\n");
+ }
+ 
++static int test_is_lv_0_skip (void)
++{
++  const char *str;
++
++  str = getenv ("TEST_ONLY");
++  if (str)
++    return strstr (str, "is_lv") == NULL;
++  str = getenv ("SKIP_TEST_IS_LV_0");
++  if (str && STREQ (str, "1")) return 1;
++  str = getenv ("SKIP_TEST_IS_LV");
++  if (str && STREQ (str, "1")) return 1;
++  return 0;
++}
++
++static int test_is_lv_0 (void)
++{
++  if (test_is_lv_0_skip ()) {
++    printf ("        %s skipped (reason: environment variable set)\n", "test_is_lv_0");
++    return 0;
++  }
++
++  {
++    const char *groups[] = { "lvm2", NULL };
++    int r;
++    suppress_error = 1;
++    r = guestfs_available (g, (char **) groups);
++    suppress_error = 0;
++    if (r == -1) {
++      printf ("        %s skipped (reason: group %s not available in daemon)\n", "test_is_lv_0", groups[0]);
++      return 0;
++    }
++  }
++  /* InitBasicFSonLVM for test_is_lv_0: create ext2 on /dev/VG/LV */
++  {
++    const char *device = "/dev/sda";
++    int r;
++    suppress_error = 0;
++    r = guestfs_blockdev_setrw (g, device);
++    if (r == -1)
++      return -1;
++  }
++  {
++    int r;
++    suppress_error = 0;
++    r = guestfs_umount_all (g);
++    if (r == -1)
++      return -1;
++  }
++  {
++    int r;
++    suppress_error = 0;
++    r = guestfs_lvm_remove_all (g);
++    if (r == -1)
++      return -1;
++  }
++  {
++    const char *device = "/dev/sda";
++    const char *parttype = "mbr";
++    int r;
++    suppress_error = 0;
++    r = guestfs_part_disk (g, device, parttype);
++    if (r == -1)
++      return -1;
++  }
++  {
++    const char *device = "/dev/sda1";
++    int r;
++    suppress_error = 0;
++    r = guestfs_pvcreate (g, device);
++    if (r == -1)
++      return -1;
++  }
++  {
++    const char *volgroup = "VG";
++    const char *physvols_0 = "/dev/sda1";
++    const char *const physvols[] = {
++      physvols_0,
++      NULL
++    };
++    int r;
++    suppress_error = 0;
++    r = guestfs_vgcreate (g, volgroup, (char **) physvols);
++    if (r == -1)
++      return -1;
++  }
++  {
++    const char *logvol = "LV";
++    const char *volgroup = "VG";
++    int r;
++    suppress_error = 0;
++    r = guestfs_lvcreate (g, logvol, volgroup, 8);
++    if (r == -1)
++      return -1;
++  }
++  {
++    const char *fstype = "ext2";
++    const char *device = "/dev/VG/LV";
++    int r;
++    suppress_error = 0;
++    r = guestfs_mkfs (g, fstype, device);
++    if (r == -1)
++      return -1;
++  }
++  {
++    const char *options = "";
++    const char *device = "/dev/VG/LV";
++    const char *mountpoint = "/";
++    int r;
++    suppress_error = 0;
++    r = guestfs_mount_options (g, options, device, mountpoint);
++    if (r == -1)
++      return -1;
++  }
++  /* TestOutputTrue for is_lv (0) */
++  {
++    const char *device = "/dev/VG/LV";
++    int r;
++    suppress_error = 0;
++    r = guestfs_is_lv (g, device);
++    if (r == -1)
++      return -1;
++    if (!r) {
++      fprintf (stderr, "test_is_lv_0: expected true, got false\n");
++      return -1;
++    }
++  }
++  return 0;
++}
++
++static int test_is_lv_1_skip (void)
++{
++  const char *str;
++
++  str = getenv ("TEST_ONLY");
++  if (str)
++    return strstr (str, "is_lv") == NULL;
++  str = getenv ("SKIP_TEST_IS_LV_1");
++  if (str && STREQ (str, "1")) return 1;
++  str = getenv ("SKIP_TEST_IS_LV");
++  if (str && STREQ (str, "1")) return 1;
++  return 0;
++}
++
++static int test_is_lv_1 (void)
++{
++  if (test_is_lv_1_skip ()) {
++    printf ("        %s skipped (reason: environment variable set)\n", "test_is_lv_1");
++    return 0;
++  }
++
++  {
++    const char *groups[] = { "lvm2", NULL };
++    int r;
++    suppress_error = 1;
++    r = guestfs_available (g, (char **) groups);
++    suppress_error = 0;
++    if (r == -1) {
++      printf ("        %s skipped (reason: group %s not available in daemon)\n", "test_is_lv_1", groups[0]);
++      return 0;
++    }
++  }
++  /* InitBasicFSonLVM for test_is_lv_1: create ext2 on /dev/VG/LV */
++  {
++    const char *device = "/dev/sda";
++    int r;
++    suppress_error = 0;
++    r = guestfs_blockdev_setrw (g, device);
++    if (r == -1)
++      return -1;
++  }
++  {
++    int r;
++    suppress_error = 0;
++    r = guestfs_umount_all (g);
++    if (r == -1)
++      return -1;
++  }
++  {
++    int r;
++    suppress_error = 0;
++    r = guestfs_lvm_remove_all (g);
++    if (r == -1)
++      return -1;
++  }
++  {
++    const char *device = "/dev/sda";
++    const char *parttype = "mbr";
++    int r;
++    suppress_error = 0;
++    r = guestfs_part_disk (g, device, parttype);
++    if (r == -1)
++      return -1;
++  }
++  {
++    const char *device = "/dev/sda1";
++    int r;
++    suppress_error = 0;
++    r = guestfs_pvcreate (g, device);
++    if (r == -1)
++      return -1;
++  }
++  {
++    const char *volgroup = "VG";
++    const char *physvols_0 = "/dev/sda1";
++    const char *const physvols[] = {
++      physvols_0,
++      NULL
++    };
++    int r;
++    suppress_error = 0;
++    r = guestfs_vgcreate (g, volgroup, (char **) physvols);
++    if (r == -1)
++      return -1;
++  }
++  {
++    const char *logvol = "LV";
++    const char *volgroup = "VG";
++    int r;
++    suppress_error = 0;
++    r = guestfs_lvcreate (g, logvol, volgroup, 8);
++    if (r == -1)
++      return -1;
++  }
++  {
++    const char *fstype = "ext2";
++    const char *device = "/dev/VG/LV";
++    int r;
++    suppress_error = 0;
++    r = guestfs_mkfs (g, fstype, device);
++    if (r == -1)
++      return -1;
++  }
++  {
++    const char *options = "";
++    const char *device = "/dev/VG/LV";
++    const char *mountpoint = "/";
++    int r;
++    suppress_error = 0;
++    r = guestfs_mount_options (g, options, device, mountpoint);
++    if (r == -1)
++      return -1;
++  }
++  /* TestOutputFalse for is_lv (1) */
++  {
++    const char *device = "/dev/sda1";
++    int r;
++    suppress_error = 0;
++    r = guestfs_is_lv (g, device);
++    if (r == -1)
++      return -1;
++    if (r) {
++      fprintf (stderr, "test_is_lv_1: expected false, got true\n");
++      return -1;
++    }
++  }
++  return 0;
++}
++
+ static int test_part_get_mbr_id_0_skip (void)
+ {
+   const char *str;
+@@ -25905,11 +26163,27 @@
+   /* Cancel previous alarm. */
+   alarm (0);
+ 
+-  nr_tests = 262;
++  nr_tests = 264;
+ 
+   test_num++;
+   if (guestfs_get_verbose (g))
+     printf ("-------------------------------------------------------------------------------\n");
++  printf ("%3d/%3d test_is_lv_0\n", test_num, nr_tests);
++  if (test_is_lv_0 () == -1) {
++    printf ("test_is_lv_0 FAILED\n");
++    n_failed++;
++  }
++  test_num++;
++  if (guestfs_get_verbose (g))
++    printf ("-------------------------------------------------------------------------------\n");
++  printf ("%3d/%3d test_is_lv_1\n", test_num, nr_tests);
++  if (test_is_lv_1 () == -1) {
++    printf ("test_is_lv_1 FAILED\n");
++    n_failed++;
++  }
++  test_num++;
++  if (guestfs_get_verbose (g))
++    printf ("-------------------------------------------------------------------------------\n");
+   printf ("%3d/%3d test_part_get_mbr_id_0\n", test_num, nr_tests);
+   if (test_part_get_mbr_id_0 () == -1) {
+     printf ("test_part_get_mbr_id_0 FAILED\n");
+diff -ur libguestfs-1.2.7.orig/daemon/actions.h libguestfs-1.2.7.islv/daemon/actions.h
+--- libguestfs-1.2.7.orig/daemon/actions.h	2010-07-30 17:18:21.339774227 +0100
++++ libguestfs-1.2.7.islv/daemon/actions.h	2010-07-30 17:11:20.517533590 +0100
+@@ -254,3 +254,4 @@
+ extern int do_part_get_mbr_id (const char *device, int partnum);
+ extern int do_part_set_mbr_id (const char *device, int partnum, int idbyte);
+ extern int do_aug_clear (const char *augpath);
++extern int do_is_lv (const char *device);
+diff -ur libguestfs-1.2.7.orig/daemon/lvm.c libguestfs-1.2.7.islv/daemon/lvm.c
+--- libguestfs-1.2.7.orig/daemon/lvm.c	2010-04-30 17:38:11.000000000 +0100
++++ libguestfs-1.2.7.islv/daemon/lvm.c	2010-07-30 17:10:32.325968079 +0100
+@@ -22,6 +22,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
++#include <sys/stat.h>
+ 
+ #include "daemon.h"
+ #include "c-ctype.h"
+@@ -594,3 +595,49 @@
+ {
+   return get_lvm_fields ("vgs", "lv_uuid", vgname);
+ }
++
++/* Test if a device is a logical volume (RHBZ#619793).
++ *
++ * This is harder than it should be.  A LV device like /dev/VG/LV is
++ * really a symlink to a device-mapper device like /dev/dm-0.  However
++ * at the device-mapper (kernel) level, nothing is really known about
++ * LVM (a userspace concept).  Therefore we use a convoluted method to
++ * determine this, by listing out known LVs and checking whether the
++ * rdev (major/minor) of the device we are passed matches any of them.
++ *
++ * Note use of 'stat' instead of 'lstat' so that symlinks are fully
++ * resolved.
++ */
++int
++do_is_lv (const char *device)
++{
++  struct stat stat1, stat2;
++
++  int r = stat (device, &stat1);
++  if (r == -1) {
++    reply_with_perror ("stat: %s", device);
++    return -1;
++  }
++
++  char **lvs = do_lvs ();
++  if (lvs == NULL)
++    return -1;
++
++  size_t i;
++  for (i = 0; lvs[i] != NULL; ++i) {
++    r = stat (lvs[i], &stat2);
++    if (r == -1) {
++      reply_with_perror ("stat: %s", lvs[i]);
++      free_strings (lvs);
++      return -1;
++    }
++    if (stat1.st_rdev == stat2.st_rdev) { /* found it */
++      free_strings (lvs);
++      return 1;
++    }
++  }
++
++  /* not found */
++  free_strings (lvs);
++  return 0;
++}
+diff -ur libguestfs-1.2.7.orig/daemon/names.c libguestfs-1.2.7.islv/daemon/names.c
+--- libguestfs-1.2.7.orig/daemon/names.c	2010-07-30 17:18:21.340774218 +0100
++++ libguestfs-1.2.7.islv/daemon/names.c	2010-07-30 17:11:20.582533003 +0100
+@@ -258,4 +258,5 @@
+   [235] = "part_get_mbr_id",
+   [236] = "part_set_mbr_id",
+   [239] = "aug_clear",
++  [264] = "is_lv",
+ };
+diff -ur libguestfs-1.2.7.orig/daemon/stubs.c libguestfs-1.2.7.islv/daemon/stubs.c
+--- libguestfs-1.2.7.orig/daemon/stubs.c	2010-07-30 17:18:21.342774201 +0100
++++ libguestfs-1.2.7.islv/daemon/stubs.c	2010-07-30 17:11:20.573533084 +0100
+@@ -6065,6 +6065,32 @@
+   xdr_free ((xdrproc_t) xdr_guestfs_aug_clear_args, (char *) &args);
+ }
+ 
++static void is_lv_stub (XDR *xdr_in)
++{
++  int r;
++  struct guestfs_is_lv_args args;
++
++  memset (&args, 0, sizeof args);
++
++  if (!xdr_guestfs_is_lv_args (xdr_in, &args)) {
++    reply_with_error ("daemon failed to decode procedure arguments");
++    return;
++  }
++  char *device = args.device;
++  RESOLVE_DEVICE (device, goto done);
++
++  r = do_is_lv (device);
++  if (r == -1)
++    /* do_is_lv has already called reply_with_error */
++    goto done;
++
++  struct guestfs_is_lv_ret ret;
++  ret.lvflag = r;
++  reply ((xdrproc_t) &xdr_guestfs_is_lv_ret, (char *) &ret);
++done:
++  xdr_free ((xdrproc_t) xdr_guestfs_is_lv_args, (char *) &args);
++}
++
+ void dispatch_incoming_message (XDR *xdr_in)
+ {
+   switch (proc_nr) {
+@@ -6764,6 +6790,9 @@
+     case GUESTFS_PROC_AUG_CLEAR:
+       aug_clear_stub (xdr_in);
+       break;
++    case GUESTFS_PROC_IS_LV:
++      is_lv_stub (xdr_in);
++      break;
+     default:
+       reply_with_error ("dispatch_incoming_message: unknown procedure number %d, set LIBGUESTFS_PATH to point to the matching libguestfs appliance directory", proc_nr);
+   }
+diff -ur libguestfs-1.2.7.orig/fish/cmds.c libguestfs-1.2.7.islv/fish/cmds.c
+--- libguestfs-1.2.7.orig/fish/cmds.c	2010-07-30 17:18:21.507772757 +0100
++++ libguestfs-1.2.7.islv/fish/cmds.c	2010-07-30 17:11:20.904530104 +0100
+@@ -137,6 +137,7 @@
+   printf ("%-20s %s\n", "is-dir", _("test if file exists"));
+   printf ("%-20s %s\n", "is-file", _("test if file exists"));
+   printf ("%-20s %s\n", "is-launching", _("is launching subprocess"));
++  printf ("%-20s %s\n", "is-lv", _("test if device is a logical volume"));
+   printf ("%-20s %s\n", "is-ready", _("is ready to accept commands"));
+   printf ("%-20s %s\n", "kill-subprocess", _("kill the qemu subprocess"));
+   printf ("%-20s %s\n", "launch", _("launch the qemu subprocess"));
+@@ -1644,6 +1645,11 @@
+     return 0;
+   }
+   else
++  if (STRCASEEQ (cmd, "is_lv") || STRCASEEQ (cmd, "is-lv")) {
++    pod2text ("is-lv", _("test if device is a logical volume"), "=head1 SYNOPSIS\n\n is-lv device\n\n=head1 DESCRIPTION\n\nThis command tests whether C<device> is a logical volume, and\nreturns true iff this is the case.");
++    return 0;
++  }
++  else
+     return display_builtin_command (cmd);
+ }
+ 
+@@ -7592,6 +7598,22 @@
+   return r;
+ }
+ 
++static int run_is_lv (const char *cmd, int argc, char *argv[])
++{
++  int r;
++  const char *device;
++  if (argc != 1) {
++    fprintf (stderr, _("%s should have %d parameter(s)\n"), cmd, 1);
++    fprintf (stderr, _("type 'help %s' for help on %s\n"), cmd, cmd);
++    return -1;
++  }
++  device = argv[0];
++  r = guestfs_is_lv (g, device);
++  if (r == -1) return -1;
++  if (r) printf ("true\n"); else printf ("false\n");
++  return 0;
++}
++
+ int run_action (const char *cmd, int argc, char *argv[])
+ {
+   if (STRCASEEQ (cmd, "launch") || STRCASEEQ (cmd, "run"))
+@@ -8395,6 +8417,9 @@
+   if (STRCASEEQ (cmd, "aug_clear") || STRCASEEQ (cmd, "aug-clear"))
+     return run_aug_clear (cmd, argc, argv);
+   else
++  if (STRCASEEQ (cmd, "is_lv") || STRCASEEQ (cmd, "is-lv"))
++    return run_is_lv (cmd, argc, argv);
++  else
+     {
+       fprintf (stderr, _("%s: unknown command\n"), cmd);
+       if (command_num == 1)
+diff -ur libguestfs-1.2.7.orig/fish/completion.c libguestfs-1.2.7.islv/fish/completion.c
+--- libguestfs-1.2.7.orig/fish/completion.c	2010-07-30 17:18:21.351774124 +0100
++++ libguestfs-1.2.7.islv/fish/completion.c	2010-07-30 17:11:20.913530021 +0100
+@@ -320,6 +320,7 @@
+   "part-get-mbr-id",
+   "part-set-mbr-id",
+   "aug-clear",
++  "is-lv",
+   NULL
+ };
+ 
+diff -ur libguestfs-1.2.7.orig/fish/guestfish-actions.pod libguestfs-1.2.7.islv/fish/guestfish-actions.pod
+--- libguestfs-1.2.7.orig/fish/guestfish-actions.pod	2010-07-30 17:18:21.509772739 +0100
++++ libguestfs-1.2.7.islv/fish/guestfish-actions.pod	2010-07-30 17:11:20.931529858 +0100
+@@ -1341,6 +1341,13 @@
+ 
+ For more information on states, see L<guestfs(3)>.
+ 
++=head2 is-lv
++
++ is-lv device
++
++This command tests whether C<device> is a logical volume, and
++returns true iff this is the case.
++
+ =head2 is-ready
+ 
+  is-ready
+diff -ur libguestfs-1.2.7.orig/java/com/redhat/et/libguestfs/GuestFS.java libguestfs-1.2.7.islv/java/com/redhat/et/libguestfs/GuestFS.java
+--- libguestfs-1.2.7.orig/java/com/redhat/et/libguestfs/GuestFS.java	2010-07-30 17:18:21.512772713 +0100
++++ libguestfs-1.2.7.islv/java/com/redhat/et/libguestfs/GuestFS.java	2010-07-30 17:11:41.051348577 +0100
+@@ -6622,4 +6622,22 @@
+   private native void _aug_clear (long g, String augpath)
+     throws LibGuestFSException;
+ 
++  /**
++   * test if device is a logical volume
++   * <p>
++   * This command tests whether "device" is a logical volume,
++   * and returns true iff this is the case.
++   * <p>
++   * @throws LibGuestFSException
++   */
++  public boolean is_lv (String device)
++    throws LibGuestFSException
++  {
++    if (g == 0)
++      throw new LibGuestFSException ("is_lv: handle is closed");
++    return _is_lv (g, device);
++  }
++  private native boolean _is_lv (long g, String device)
++    throws LibGuestFSException;
++
+ }
+diff -ur libguestfs-1.2.7.orig/java/com_redhat_et_libguestfs_GuestFS.c libguestfs-1.2.7.islv/java/com_redhat_et_libguestfs_GuestFS.c
+--- libguestfs-1.2.7.orig/java/com_redhat_et_libguestfs_GuestFS.c	2010-07-30 17:18:21.359774054 +0100
++++ libguestfs-1.2.7.islv/java/com_redhat_et_libguestfs_GuestFS.c	2010-07-30 17:11:41.172347489 +0100
+@@ -6799,3 +6799,21 @@
+   }
+ }
+ 
++JNIEXPORT jboolean JNICALL
++Java_com_redhat_et_libguestfs_GuestFS__1is_1lv
++  (JNIEnv *env, jobject obj, jlong jg, jstring jdevice)
++{
++  guestfs_h *g = (guestfs_h *) (long) jg;
++  int r;
++  const char *device;
++
++  device = (*env)->GetStringUTFChars (env, jdevice, NULL);
++  r = guestfs_is_lv (g, device);
++  (*env)->ReleaseStringUTFChars (env, jdevice, device);
++  if (r == -1) {
++    throw_exception (env, guestfs_last_error (g));
++    return 0;
++  }
++  return (jboolean) r;
++}
++
+diff -ur libguestfs-1.2.7.orig/ocaml/guestfs_c_actions.c libguestfs-1.2.7.islv/ocaml/guestfs_c_actions.c
+--- libguestfs-1.2.7.orig/ocaml/guestfs_c_actions.c	2010-07-30 17:18:21.362774025 +0100
++++ libguestfs-1.2.7.islv/ocaml/guestfs_c_actions.c	2010-07-30 17:11:21.036528913 +0100
+@@ -3615,6 +3615,36 @@
+ }
+ 
+ /* Automatically generated wrapper for function
++ * val is_lv : t -> string -> bool
++ */
++
++/* Emit prototype to appease gcc's -Wmissing-prototypes. */
++CAMLprim value ocaml_guestfs_is_lv (value gv, value devicev);
++
++CAMLprim value
++ocaml_guestfs_is_lv (value gv, value devicev)
++{
++  CAMLparam2 (gv, devicev);
++  CAMLlocal1 (rv);
++
++  guestfs_h *g = Guestfs_val (gv);
++  if (g == NULL)
++    ocaml_guestfs_raise_closed ("is_lv");
++
++  const char *device = String_val (devicev);
++  int r;
++
++  caml_enter_blocking_section ();
++  r = guestfs_is_lv (g, device);
++  caml_leave_blocking_section ();
++  if (r == -1)
++    ocaml_guestfs_raise_error (g, "is_lv");
++
++  rv = Val_bool (r);
++  CAMLreturn (rv);
++}
++
++/* Automatically generated wrapper for function
+  * val is_ready : t -> bool
+  */
+ 
+diff -ur libguestfs-1.2.7.orig/ocaml/guestfs.ml libguestfs-1.2.7.islv/ocaml/guestfs.ml
+--- libguestfs-1.2.7.orig/ocaml/guestfs.ml	2010-07-30 17:18:21.363774017 +0100
++++ libguestfs-1.2.7.islv/ocaml/guestfs.ml	2010-07-30 17:11:20.961529589 +0100
+@@ -258,6 +258,7 @@
+ external is_dir : t -> string -> bool = "ocaml_guestfs_is_dir"
+ external is_file : t -> string -> bool = "ocaml_guestfs_is_file"
+ external is_launching : t -> bool = "ocaml_guestfs_is_launching"
++external is_lv : t -> string -> bool = "ocaml_guestfs_is_lv"
+ external is_ready : t -> bool = "ocaml_guestfs_is_ready"
+ external kill_subprocess : t -> unit = "ocaml_guestfs_kill_subprocess"
+ external launch : t -> unit = "ocaml_guestfs_launch"
+diff -ur libguestfs-1.2.7.orig/ocaml/guestfs.mli libguestfs-1.2.7.islv/ocaml/guestfs.mli
+--- libguestfs-1.2.7.orig/ocaml/guestfs.mli	2010-07-30 17:18:21.364774010 +0100
++++ libguestfs-1.2.7.islv/ocaml/guestfs.mli	2010-07-30 17:11:20.946529724 +0100
+@@ -471,6 +471,9 @@
+ val is_launching : t -> bool
+ (** is launching subprocess *)
+ 
++val is_lv : t -> string -> bool
++(** test if device is a logical volume *)
++
+ val is_ready : t -> bool
+ (** is ready to accept commands *)
+ 
+diff -ur libguestfs-1.2.7.orig/perl/Guestfs.xs libguestfs-1.2.7.islv/perl/Guestfs.xs
+--- libguestfs-1.2.7.orig/perl/Guestfs.xs	2010-07-30 17:18:21.368773973 +0100
++++ libguestfs-1.2.7.islv/perl/Guestfs.xs	2010-07-30 17:11:21.101528326 +0100
+@@ -4393,3 +4393,17 @@
+       if (r == -1)
+         croak ("%s", guestfs_last_error (g));
+ 
++SV *
++is_lv (g, device)
++      guestfs_h *g;
++      char *device;
++PREINIT:
++      int lvflag;
++   CODE:
++      lvflag = guestfs_is_lv (g, device);
++      if (lvflag == -1)
++        croak ("%s", guestfs_last_error (g));
++      RETVAL = newSViv (lvflag);
++ OUTPUT:
++      RETVAL
++
+diff -ur libguestfs-1.2.7.orig/perl/lib/Sys/Guestfs.pm libguestfs-1.2.7.islv/perl/lib/Sys/Guestfs.pm
+--- libguestfs-1.2.7.orig/perl/lib/Sys/Guestfs.pm	2010-07-30 17:18:21.513772704 +0100
++++ libguestfs-1.2.7.islv/perl/lib/Sys/Guestfs.pm	2010-07-30 17:11:21.125528110 +0100
+@@ -1235,6 +1235,11 @@
+ 
+ For more information on states, see L<guestfs(3)>.
+ 
++=item $lvflag = $h->is_lv ($device);
++
++This command tests whether C<device> is a logical volume, and
++returns true iff this is the case.
++
+ =item $ready = $h->is_ready ();
+ 
+ This returns true iff this handle is ready to accept commands
+diff -ur libguestfs-1.2.7.orig/python/guestfs.py libguestfs-1.2.7.islv/python/guestfs.py
+--- libguestfs-1.2.7.orig/python/guestfs.py	2010-07-30 17:18:21.515772687 +0100
++++ libguestfs-1.2.7.islv/python/guestfs.py	2010-07-30 17:11:37.584379811 +0100
+@@ -3377,3 +3377,9 @@
+         """
+         return libguestfsmod.aug_clear (self._o, augpath)
+ 
++    def is_lv (self, device):
++        u"""This command tests whether "device" is a logical volume,
++        and returns true iff this is the case.
++        """
++        return libguestfsmod.is_lv (self._o, device)
++
+diff -ur libguestfs-1.2.7.orig/python/guestfs-py.c libguestfs-1.2.7.islv/python/guestfs-py.c
+--- libguestfs-1.2.7.orig/python/guestfs-py.c	2010-07-30 17:18:21.373773931 +0100
++++ libguestfs-1.2.7.islv/python/guestfs-py.c	2010-07-30 17:11:21.190527523 +0100
+@@ -7895,6 +7895,30 @@
+   return py_r;
+ }
+ 
++static PyObject *
++py_guestfs_is_lv (PyObject *self, PyObject *args)
++{
++  PyObject *py_g;
++  guestfs_h *g;
++  PyObject *py_r;
++  int r;
++  const char *device;
++
++  if (!PyArg_ParseTuple (args, (char *) "Os:guestfs_is_lv",
++                         &py_g, &device))
++    return NULL;
++  g = get_handle (py_g);
++
++  r = guestfs_is_lv (g, device);
++  if (r == -1) {
++    PyErr_SetString (PyExc_RuntimeError, guestfs_last_error (g));
++    return NULL;
++  }
++
++  py_r = PyInt_FromLong ((long) r);
++  return py_r;
++}
++
+ static PyMethodDef methods[] = {
+   { (char *) "create", py_guestfs_create, METH_VARARGS, NULL },
+   { (char *) "close", py_guestfs_close, METH_VARARGS, NULL },
+@@ -8187,6 +8211,7 @@
+   { (char *) "part_get_mbr_id", py_guestfs_part_get_mbr_id, METH_VARARGS, NULL },
+   { (char *) "part_set_mbr_id", py_guestfs_part_set_mbr_id, METH_VARARGS, NULL },
+   { (char *) "aug_clear", py_guestfs_aug_clear, METH_VARARGS, NULL },
++  { (char *) "is_lv", py_guestfs_is_lv, METH_VARARGS, NULL },
+   { NULL, NULL, 0, NULL }
+ };
+ 
+diff -ur libguestfs-1.2.7.orig/ruby/ext/guestfs/_guestfs.c libguestfs-1.2.7.islv/ruby/ext/guestfs/_guestfs.c
+--- libguestfs-1.2.7.orig/ruby/ext/guestfs/_guestfs.c	2010-07-30 17:18:21.376773903 +0100
++++ libguestfs-1.2.7.islv/ruby/ext/guestfs/_guestfs.c	2010-07-30 17:11:37.657379152 +0100
+@@ -7423,6 +7423,28 @@
+   return Qnil;
+ }
+ 
++static VALUE ruby_guestfs_is_lv (VALUE gv, VALUE devicev)
++{
++  guestfs_h *g;
++  Data_Get_Struct (gv, guestfs_h, g);
++  if (!g)
++    rb_raise (rb_eArgError, "%s: used handle after closing it", "is_lv");
++
++  Check_Type (devicev, T_STRING);
++  const char *device = StringValueCStr (devicev);
++  if (!device)
++    rb_raise (rb_eTypeError, "expected string for parameter %s of %s",
++              "device", "is_lv");
++
++  int r;
++
++  r = guestfs_is_lv (g, device);
++  if (r == -1)
++    rb_raise (e_Error, "%s", guestfs_last_error (g));
++
++  return INT2NUM (r);
++}
++
+ /* Initialize the module. */
+ void Init__guestfs ()
+ {
+@@ -8011,4 +8033,6 @@
+         ruby_guestfs_part_set_mbr_id, 3);
+   rb_define_method (c_guestfs, "aug_clear",
+         ruby_guestfs_aug_clear, 1);
++  rb_define_method (c_guestfs, "is_lv",
++        ruby_guestfs_is_lv, 1);
+ }
+diff -ur libguestfs-1.2.7.orig/src/generator.ml libguestfs-1.2.7.islv/src/generator.ml
+--- libguestfs-1.2.7.orig/src/generator.ml	2010-07-30 17:18:21.503772792 +0100
++++ libguestfs-1.2.7.islv/src/generator.ml	2010-07-30 17:11:12.060609806 +0100
+@@ -4502,6 +4502,16 @@
+ Set the value associated with C<path> to C<NULL>.  This
+ is the same as the L<augtool(1)> C<clear> command.");
+ 
++  ("is_lv", (RBool "lvflag", [Device "device"]), 264, [Optional "lvm2"],
++   [InitBasicFSonLVM, Always, TestOutputTrue (
++      [["is_lv"; "/dev/VG/LV"]]);
++    InitBasicFSonLVM, Always, TestOutputFalse (
++      [["is_lv"; "/dev/sda1"]])],
++   "test if device is a logical volume",
++   "\
++This command tests whether C<device> is a logical volume, and
++returns true iff this is the case.");
++
+ ]
+ 
+ let all_functions = non_daemon_functions @ daemon_functions
+diff -ur libguestfs-1.2.7.orig/src/guestfs-actions.c libguestfs-1.2.7.islv/src/guestfs-actions.c
+--- libguestfs-1.2.7.orig/src/guestfs-actions.c	2010-07-30 17:18:21.385773824 +0100
++++ libguestfs-1.2.7.islv/src/guestfs-actions.c	2010-07-30 17:11:20.441534275 +0100
+@@ -13746,6 +13746,60 @@
+   return 0;
+ }
+ 
++int guestfs_is_lv (guestfs_h *g,
++		const char *device)
++{
++  struct guestfs_is_lv_args args;
++  guestfs_message_header hdr;
++  guestfs_message_error err;
++  struct guestfs_is_lv_ret ret;
++  int serial;
++  int r;
++
++  if (guestfs__get_trace (g)) {
++    printf ("is_lv");
++    printf (" \"%s\"", device);
++    putchar ('\n');
++  }
++
++  if (check_state (g, "guestfs_is_lv") == -1) return -1;
++  guestfs___set_busy (g);
++
++  args.device = (char *) device;
++  serial = guestfs___send (g, GUESTFS_PROC_IS_LV,
++        (xdrproc_t) xdr_guestfs_is_lv_args, (char *) &args);
++  if (serial == -1) {
++    guestfs___end_busy (g);
++    return -1;
++  }
++
++  memset (&hdr, 0, sizeof hdr);
++  memset (&err, 0, sizeof err);
++  memset (&ret, 0, sizeof ret);
++
++  r = guestfs___recv (g, "is_lv", &hdr, &err,
++        (xdrproc_t) xdr_guestfs_is_lv_ret, (char *) &ret);
++  if (r == -1) {
++    guestfs___end_busy (g);
++    return -1;
++  }
++
++  if (check_reply_header (g, &hdr, GUESTFS_PROC_IS_LV, serial) == -1) {
++    guestfs___end_busy (g);
++    return -1;
++  }
++
++  if (hdr.status == GUESTFS_STATUS_ERROR) {
++    error (g, "%s: %s", "is_lv", err.error_message);
++    free (err.error_message);
++    guestfs___end_busy (g);
++    return -1;
++  }
++
++  guestfs___end_busy (g);
++  return ret.lvflag;
++}
++
+ /* Structure-freeing functions.  These rely on the fact that the
+  * structure format is identical to the XDR format.  See note in
+  * generator.ml.
+diff -ur libguestfs-1.2.7.orig/src/guestfs-actions.h libguestfs-1.2.7.islv/src/guestfs-actions.h
+--- libguestfs-1.2.7.orig/src/guestfs-actions.h	2010-07-30 17:18:21.386773817 +0100
++++ libguestfs-1.2.7.islv/src/guestfs-actions.h	2010-07-30 17:11:20.343535158 +0100
+@@ -309,3 +309,4 @@
+ extern int guestfs_part_get_mbr_id (guestfs_h *g, const char *device, int partnum);
+ extern int guestfs_part_set_mbr_id (guestfs_h *g, const char *device, int partnum, int idbyte);
+ extern int guestfs_aug_clear (guestfs_h *g, const char *augpath);
++extern int guestfs_is_lv (guestfs_h *g, const char *device);
+diff -ur libguestfs-1.2.7.orig/src/guestfs-actions.pod libguestfs-1.2.7.islv/src/guestfs-actions.pod
+--- libguestfs-1.2.7.orig/src/guestfs-actions.pod	2010-07-30 17:18:21.517772669 +0100
++++ libguestfs-1.2.7.islv/src/guestfs-actions.pod	2010-07-30 17:11:20.483533895 +0100
+@@ -1711,6 +1711,16 @@
+ 
+ This function returns a C truth value on success or -1 on error.
+ 
++=head2 guestfs_is_lv
++
++ int guestfs_is_lv (guestfs_h *g,
++		const char *device);
++
++This command tests whether C<device> is a logical volume, and
++returns true iff this is the case.
++
++This function returns a C truth value on success or -1 on error.
++
+ =head2 guestfs_is_ready
+ 
+  int guestfs_is_ready (guestfs_h *g);
+diff -ur libguestfs-1.2.7.orig/src/guestfs-availability.pod libguestfs-1.2.7.islv/src/guestfs-availability.pod
+--- libguestfs-1.2.7.orig/src/guestfs-availability.pod	2010-07-30 17:18:21.389773791 +0100
++++ libguestfs-1.2.7.islv/src/guestfs-availability.pod	2010-07-30 17:11:20.489533840 +0100
+@@ -56,6 +56,7 @@
+ =item B<lvm2>
+ 
+ The following functions:
++L</guestfs_is_lv>
+ L</guestfs_lvcreate>
+ L</guestfs_lvm_remove_all>
+ L</guestfs_lvremove>
+diff -ur libguestfs-1.2.7.orig/src/guestfs_protocol.x libguestfs-1.2.7.islv/src/guestfs_protocol.x
+--- libguestfs-1.2.7.orig/src/guestfs_protocol.x	2010-07-30 17:18:21.391773772 +0100
++++ libguestfs-1.2.7.islv/src/guestfs_protocol.x	2010-07-30 17:11:20.319535373 +0100
+@@ -1571,6 +1571,14 @@
+   string augpath<>;
+ };
+ 
++struct guestfs_is_lv_args {
++  string device<>;
++};
++
++struct guestfs_is_lv_ret {
++  bool lvflag;
++};
++
+ enum guestfs_procedure {
+   GUESTFS_PROC_MOUNT = 1,
+   GUESTFS_PROC_SYNC = 2,
+@@ -1804,6 +1812,7 @@
+   GUESTFS_PROC_PART_GET_MBR_ID = 235,
+   GUESTFS_PROC_PART_SET_MBR_ID = 236,
+   GUESTFS_PROC_AUG_CLEAR = 239,
++  GUESTFS_PROC_IS_LV = 264,
+   GUESTFS_PROC_NR_PROCS
+ };
+ 
+diff -ur libguestfs-1.2.7.orig/src/libguestfs.syms libguestfs-1.2.7.islv/src/libguestfs.syms
+--- libguestfs-1.2.7.orig/src/libguestfs.syms	2010-07-30 17:18:21.392773763 +0100
++++ libguestfs-1.2.7.islv/src/libguestfs.syms	2010-07-30 17:11:20.505533697 +0100
+@@ -147,6 +147,7 @@
+         guestfs_is_dir;
+         guestfs_is_file;
+         guestfs_is_launching;
++        guestfs_is_lv;
+         guestfs_is_ready;
+         guestfs_kill_subprocess;
+         guestfs_last_error;
+diff -ur libguestfs-1.2.7.orig/src/MAX_PROC_NR libguestfs-1.2.7.islv/src/MAX_PROC_NR
+--- libguestfs-1.2.7.orig/src/MAX_PROC_NR	2010-07-30 17:18:21.393773754 +0100
++++ libguestfs-1.2.7.islv/src/MAX_PROC_NR	2010-07-30 17:11:20.496533778 +0100
+@@ -1 +1 @@
+-239
++264

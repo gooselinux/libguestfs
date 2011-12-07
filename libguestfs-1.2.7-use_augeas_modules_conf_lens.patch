@@ -1,0 +1,17 @@
+diff -up libguestfs-1.2.7/perl/lib/Sys/Guestfs/Lib.pm.orig libguestfs-1.2.7/perl/lib/Sys/Guestfs/Lib.pm
+--- libguestfs-1.2.7/perl/lib/Sys/Guestfs/Lib.pm.orig	2010-05-14 17:24:24.000000000 +0100
++++ libguestfs-1.2.7/perl/lib/Sys/Guestfs/Lib.pm	2010-05-27 16:08:53.900627407 +0100
+@@ -1802,13 +1802,6 @@ sub _find_modprobe_aliases
+     # Initialise augeas
+     $g->aug_init("/", 16);
+ 
+-    # Register additional paths to the Modprobe lens
+-    $g->aug_set("/augeas/load/Modprobe/incl[last()+1]", "/etc/modules.conf");
+-    $g->aug_set("/augeas/load/Modprobe/incl[last()+1]", "/etc/conf.modules");
+-
+-    # Make augeas reload
+-    $g->aug_load();
+-
+     my %modprobe_aliases;
+ 
+     for my $pattern qw(/files/etc/conf.modules/alias

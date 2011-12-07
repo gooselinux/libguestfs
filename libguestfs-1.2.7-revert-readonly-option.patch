@@ -1,0 +1,200 @@
+From 799d52be4f08f6c70c0e8ba1aa7367ba4cdd78c4 Mon Sep 17 00:00:00 2001
+From: Richard Jones <rjones@redhat.com>
+Date: Thu, 22 Jul 2010 14:39:36 +0100
+Subject: [PATCH] Revert "add_drive_ro adds readonly=on option if available." (RHBZ#617200).
+
+Adding the readonly=on option is not so clever.  This causes
+qemu to present the disk as read-only to the guest.  (The
+expected behaviour of snapshots=on,readonly=on was that it
+would open the disk O_RDONLY but present a writable disk to
+the guest).
+
+Since the guest sees a read-only disk, we are unable to do any
+recovery if a filesystem on the disk is inconsistent.  This basically
+prevents most accesses to live disk images.
+
+What we really want is a qemu option which presents a writable
+disk to the guest, but only opens the disk on the host side with
+O_RDONLY, to alleviate the udev bug RHBZ#571714.
+
+This reverts commit 676462684e05dd8341dd695762dd99a87d8ec022.
+---
+ src/generator.ml |    4 +---
+ src/guestfs.c    |   22 ++++------------------
+ 2 files changed, 5 insertions(+), 21 deletions(-)
+
+diff --git a/src/generator.ml b/src/generator.ml
+index 69f561c..372d01e 100755
+--- a/src/generator.ml
++++ b/src/generator.ml
+@@ -559,15 +559,13 @@ handle is closed.  We don't currently have any method to enable
+ changes to be committed, although qemu can support this.
+ 
+ This is equivalent to the qemu parameter
+-C<-drive file=filename,snapshot=on,readonly=on,if=...>.
++C<-drive file=filename,snapshot=on,if=...>.
+ 
+ C<if=...> is set at compile time by the configuration option
+ C<./configure --with-drive-if=...>.  In the rare case where you
+ might need to change this at run time, use C<guestfs_add_drive_with_if>
+ or C<guestfs_add_drive_ro_with_if>.
+ 
+-C<readonly=on> is only added where qemu supports this option.
+-
+ Note that this call checks for the existence of C<filename>.  This
+ stops you from specifying other types of drive which are supported
+ by qemu such as C<nbd:> and C<http:> URLs.  To specify those, use
+diff --git a/src/guestfs.c b/src/guestfs.c
+index 85a042a..d6c8d60 100644
+--- a/src/guestfs.c
++++ b/src/guestfs.c
+@@ -836,6 +836,9 @@ int
+ guestfs__add_drive_ro_with_if (guestfs_h *g, const char *filename,
+                                const char *drive_if)
+ {
++  size_t len = strlen (filename) + 64;
++  char buf[len];
++
+   if (strchr (filename, ',') != NULL) {
+     error (g, _("filename cannot contain ',' (comma) character"));
+     return -1;
+@@ -846,24 +849,7 @@ guestfs__add_drive_ro_with_if (guestfs_h *g, const char *filename,
+     return -1;
+   }
+ 
+-  if (qemu_supports (g, NULL) == -1)
+-    return -1;
+-
+-  /* Only SCSI and virtio drivers support readonly mode.
+-   * This is only supported as a QEMU feature since 2010/01.
+-   */
+-  int supports_ro = 0;
+-  if ((STREQ (drive_if, "scsi") || STREQ (drive_if, "virtio")) &&
+-      qemu_supports (g, "readonly=on"))
+-    supports_ro = 1;
+-
+-  size_t len = strlen (filename) + 100;
+-  char buf[len];
+-
+-  snprintf (buf, len, "file=%s,snapshot=on,%sif=%s",
+-            filename,
+-            supports_ro ? "readonly=on," : "",
+-            drive_if);
++  snprintf (buf, len, "file=%s,snapshot=on,if=%s", filename, drive_if);
+ 
+   return guestfs__config (g, "-drive", buf);
+ }
+diff -ur libguestfs-1.2.7.orig/fish/cmds.c libguestfs-1.2.7/fish/cmds.c
+--- libguestfs-1.2.7.orig/fish/cmds.c	2010-07-30 17:09:29.970530857 +0100
++++ libguestfs-1.2.7/fish/cmds.c	2010-07-30 17:15:21.414367448 +0100
+@@ -330,7 +330,7 @@
+   }
+   else
+   if (STRCASEEQ (cmd, "add_drive_ro") || STRCASEEQ (cmd, "add-drive-ro") || STRCASEEQ (cmd, "add-ro")) {
+-    pod2text ("add-drive-ro", _("add a drive in snapshot mode (read-only)"), "=head1 SYNOPSIS\n\n add-drive-ro filename\n\n=head1 DESCRIPTION\n\nThis adds a drive in snapshot mode, making it effectively\nread-only.\n\nNote that writes to the device are allowed, and will be seen for\nthe duration of the guestfs handle, but they are written\nto a temporary file which is discarded as soon as the guestfs\nhandle is closed.  We don't currently have any method to enable\nchanges to be committed, although qemu can support this.\n\nThis is equivalent to the qemu parameter\nC<-drive file=filename,snapshot=on,readonly=on,if=...>.\n\nC<if=...> is set at compile time by the configuration option\nC<./configure --with-drive-if=...>.  In the rare case where you\nmight need to change this at run time, use C<add_drive_with_if>\nor C<add_drive_ro_with_if>.\n\nC<readonly=on> is only added where qemu supports this option.\n\nNote that this call checks for the existence of C<filename>.  This\nstops you from specifying other types of drive which are supported\nby qemu such as C<nbd:> and C<http:> URLs.  To specify those, use\nthe general C<config> call instead.\n\nYou can use 'add-ro' as an alias for this command.");
++    pod2text ("add-drive-ro", _("add a drive in snapshot mode (read-only)"), "=head1 SYNOPSIS\n\n add-drive-ro filename\n\n=head1 DESCRIPTION\n\nThis adds a drive in snapshot mode, making it effectively\nread-only.\n\nNote that writes to the device are allowed, and will be seen for\nthe duration of the guestfs handle, but they are written\nto a temporary file which is discarded as soon as the guestfs\nhandle is closed.  We don't currently have any method to enable\nchanges to be committed, although qemu can support this.\n\nThis is equivalent to the qemu parameter\nC<-drive file=filename,snapshot=on,if=...>.\n\nC<if=...> is set at compile time by the configuration option\nC<./configure --with-drive-if=...>.  In the rare case where you\nmight need to change this at run time, use C<add_drive_with_if>\nor C<add_drive_ro_with_if>.\n\nNote that this call checks for the existence of C<filename>.  This\nstops you from specifying other types of drive which are supported\nby qemu such as C<nbd:> and C<http:> URLs.  To specify those, use\nthe general C<config> call instead.\n\nYou can use 'add-ro' as an alias for this command.");
+     return 0;
+   }
+   else
+diff -ur libguestfs-1.2.7.orig/fish/guestfish-actions.pod libguestfs-1.2.7/fish/guestfish-actions.pod
+--- libguestfs-1.2.7.orig/fish/guestfish-actions.pod	2010-07-30 17:09:29.999530595 +0100
++++ libguestfs-1.2.7/fish/guestfish-actions.pod	2010-07-30 17:15:21.442367197 +0100
+@@ -70,15 +70,13 @@
+ changes to be committed, although qemu can support this.
+ 
+ This is equivalent to the qemu parameter
+-C<-drive file=filename,snapshot=on,readonly=on,if=...>.
++C<-drive file=filename,snapshot=on,if=...>.
+ 
+ C<if=...> is set at compile time by the configuration option
+ C<./configure --with-drive-if=...>.  In the rare case where you
+ might need to change this at run time, use C<add-drive-with-if>
+ or C<add-drive-ro-with-if>.
+ 
+-C<readonly=on> is only added where qemu supports this option.
+-
+ Note that this call checks for the existence of C<filename>.  This
+ stops you from specifying other types of drive which are supported
+ by qemu such as C<nbd:> and C<http:> URLs.  To specify those, use
+diff -ur libguestfs-1.2.7.orig/java/com/redhat/et/libguestfs/GuestFS.java libguestfs-1.2.7/java/com/redhat/et/libguestfs/GuestFS.java
+--- libguestfs-1.2.7.orig/java/com/redhat/et/libguestfs/GuestFS.java	2010-07-30 17:09:30.001530578 +0100
++++ libguestfs-1.2.7/java/com/redhat/et/libguestfs/GuestFS.java	2010-07-30 17:15:41.663185802 +0100
+@@ -450,16 +450,13 @@
+    * although qemu can support this.
+    * <p>
+    * This is equivalent to the qemu parameter "-drive
+-   * file=filename,snapshot=on,readonly=on,if=...".
++   * file=filename,snapshot=on,if=...".
+    * <p>
+    * "if=..." is set at compile time by the configuration
+    * option "./configure --with-drive-if=...". In the rare
+    * case where you might need to change this at run time,
+    * use "g.add_drive_with_if" or "g.add_drive_ro_with_if".
+    * <p>
+-   * "readonly=on" is only added where qemu supports this
+-   * option.
+-   * <p>
+    * Note that this call checks for the existence of
+    * "filename". This stops you from specifying other types
+    * of drive which are supported by qemu such as "nbd:" and
+diff -ur libguestfs-1.2.7.orig/perl/lib/Sys/Guestfs.pm libguestfs-1.2.7/perl/lib/Sys/Guestfs.pm
+--- libguestfs-1.2.7.orig/perl/lib/Sys/Guestfs.pm	2010-07-30 17:09:30.002530567 +0100
++++ libguestfs-1.2.7/perl/lib/Sys/Guestfs.pm	2010-07-30 17:15:21.632365496 +0100
+@@ -162,15 +162,13 @@
+ changes to be committed, although qemu can support this.
+ 
+ This is equivalent to the qemu parameter
+-C<-drive file=filename,snapshot=on,readonly=on,if=...>.
++C<-drive file=filename,snapshot=on,if=...>.
+ 
+ C<if=...> is set at compile time by the configuration option
+ C<./configure --with-drive-if=...>.  In the rare case where you
+ might need to change this at run time, use C<$h-E<gt>add_drive_with_if>
+ or C<$h-E<gt>add_drive_ro_with_if>.
+ 
+-C<readonly=on> is only added where qemu supports this option.
+-
+ Note that this call checks for the existence of C<filename>.  This
+ stops you from specifying other types of drive which are supported
+ by qemu such as C<nbd:> and C<http:> URLs.  To specify those, use
+diff -ur libguestfs-1.2.7.orig/python/guestfs.py libguestfs-1.2.7/python/guestfs.py
+--- libguestfs-1.2.7.orig/python/guestfs.py	2010-07-30 17:09:30.004530548 +0100
++++ libguestfs-1.2.7/python/guestfs.py	2010-07-30 17:15:37.994218710 +0100
+@@ -236,16 +236,13 @@
+         although qemu can support this.
+         
+         This is equivalent to the qemu parameter "-drive
+-        file=filename,snapshot=on,readonly=on,if=...".
++        file=filename,snapshot=on,if=...".
+         
+         "if=..." is set at compile time by the configuration
+         option "./configure --with-drive-if=...". In the rare
+         case where you might need to change this at run time,
+         use "g.add_drive_with_if" or "g.add_drive_ro_with_if".
+         
+-        "readonly=on" is only added where qemu supports this
+-        option.
+-        
+         Note that this call checks for the existence of
+         "filename". This stops you from specifying other types
+         of drive which are supported by qemu such as "nbd:" and
+diff -ur libguestfs-1.2.7.orig/src/guestfs-actions.pod libguestfs-1.2.7/src/guestfs-actions.pod
+--- libguestfs-1.2.7.orig/src/guestfs-actions.pod	2010-07-30 17:09:30.008530514 +0100
++++ libguestfs-1.2.7/src/guestfs-actions.pod	2010-07-30 17:15:20.999371172 +0100
+@@ -77,15 +77,13 @@
+ changes to be committed, although qemu can support this.
+ 
+ This is equivalent to the qemu parameter
+-C<-drive file=filename,snapshot=on,readonly=on,if=...>.
++C<-drive file=filename,snapshot=on,if=...>.
+ 
+ C<if=...> is set at compile time by the configuration option
+ C<./configure --with-drive-if=...>.  In the rare case where you
+ might need to change this at run time, use C<guestfs_add_drive_with_if>
+ or C<guestfs_add_drive_ro_with_if>.
+ 
+-C<readonly=on> is only added where qemu supports this option.
+-
+ Note that this call checks for the existence of C<filename>.  This
+ stops you from specifying other types of drive which are supported
+ by qemu such as C<nbd:> and C<http:> URLs.  To specify those, use
